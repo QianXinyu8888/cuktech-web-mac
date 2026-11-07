@@ -57,7 +57,7 @@ class SetupService:
             except SetupError as exc:
                 ready, message = False, str(exc)
             return {'ok': True, 'device_ready': ready, 'message': message,
-                    'import_url': f'http://127.0.0.1:{port}/config.html'}
+                    'import_url': f'http://127.0.0.1:{port}/config.html?setup=esp32'}
         except SetupError as exc:
             return {'ok': False, 'device_ready': False, 'message': str(exc)}
 
@@ -107,7 +107,7 @@ class SetupService:
 PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>酷态站 ESP32 首次配网</title>
 <style>body{font:16px system-ui;max-width:660px;margin:48px auto;padding:0 24px;line-height:1.7}input,button,a{font:inherit}input{display:block;width:95%;padding:10px;margin:8px 0 20px}button{padding:10px 18px}#result{white-space:pre-wrap}</style>
 <h1>ESP32 首次配网</h1><p>设备凭据只在此 Mac 与 ESP32 之间传送。本助手仅监听本机。</p>
-<ol><li>先启动本项目 Mac 版，在<a id="import" target="_blank" rel="noopener">配置页扫码导入米家主设备并保存</a>。<button id="refresh">重新检查导入</button></li><li>手动将 Mac Wi-Fi 连接到 ESP32 配网热点，保留此页面。</li><li>填写 ESP32 要连接的 <strong>2.4GHz Wi-Fi</strong>，点击发送。保存后 ESP32 会重启。</li></ol>
+<ol><li>先启动本项目 Mac 版，点击<a id="import" target="_blank" rel="noopener">扫码登录米家</a>，用米家 App 扫码确认，选择充电器并导入。程序自动获取密钥，无需查找或复制。<button id="refresh">检查导入结果</button></li><li>手动将 Mac Wi-Fi 连接到 ESP32 配网热点，保留此页面。热点随机密码在开发板 USB 串口中显示。</li><li>填写 ESP32 要连接的 <strong>2.4GHz Wi-Fi</strong>，点击发送。保存后 ESP32 会重启；今后正常查看网页不必再扫码或配网。</li></ol>
 <form id="setup"><label>Wi-Fi SSID<input id="ssid" maxlength="32" required autocomplete="off"></label><label>Wi-Fi 密码<input id="password" type="password" required autocomplete="off" minlength="8" maxlength="63"></label><label>新网关一次性云端凭据（默认设备可留空）<input id="cloud-token" type="password" autocomplete="off" maxlength="256"></label><button id="send">发送到 ESP32</button></form><p id="result" role="status"></p>
 <script>const csrf=__CSRF__;const result=document.querySelector('#result'),send=document.querySelector('#send');async function state(){try{const s=await(await fetch('/api/state',{cache:'no-store'})).json();result.textContent=s.message;send.disabled=!s.device_ready;const a=document.querySelector('#import');if(s.import_url)a.href=s.import_url;}catch{result.textContent='本地助手已停止，请重新运行。';send.disabled=true;}}document.querySelector('#refresh').onclick=state;document.querySelector('#setup').onsubmit=async e=>{e.preventDefault();send.disabled=true;result.textContent='等待 ESP32 确认保存…';try{const r=await fetch('/api/configure',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({ssid:document.querySelector('#ssid').value,password:document.querySelector('#password').value,cloud_token:document.querySelector('#cloud-token').value})});const s=await r.json();result.textContent=s.message||s.error;document.querySelector('#password').value='';document.querySelector('#cloud-token').value='';}catch{result.textContent='发送失败，尚未确认保存。检查配网热点后重试。';}finally{send.disabled=false;}};state();</script></html>'''
 

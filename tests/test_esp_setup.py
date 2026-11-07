@@ -28,6 +28,9 @@ class SetupTests(unittest.TestCase):
   for token,key in [('ab'*16,'cd'*16),('ab'*11,'cd'*16),('ab'*12,'cd'*12),('ab'*12,'cd'*17)]:
    (self.root/'runtime/config.yaml').write_text(f'ble:\n  mac: "AA:BB:CC:DD:EE:FF"\n  token: "{token}"\n  ble_key: "{key}"\n')
    with self.assertRaises(SetupError):service._device()
+ def test_import_link_opens_direct_qr_flow(self):
+  service=SetupService(self.root)
+  self.assertEqual(service.state()['import_url'],'http://127.0.0.1:18299/config.html?setup=esp32')
  def test_missing_device_and_invalid_wifi_do_not_send(self):
   service=SetupService(self.root)
   with self.assertRaises(SetupError):service.configure({'ssid':'x','password':'short'})
