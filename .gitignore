@@ -1,0 +1,50 @@
+# 本机运行环境（含设备凭据、充电历史、日志），绝不入库 / 打包
+runtime/
+.venv/
+
+# 本机编译并 ad-hoc 签名的启动器，由 macos/build_app.sh 生成
+*.app/
+
+# Python / 测试产物
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.pyc
+.DS_Store
+
+# 任何本机生成的配置与备份
+config.yaml
+config.yaml.bak
+src/**/config.yaml
+src/**/config.yaml.bak
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+*.lock
+
+# 本机环境密钥、轮转日志、临时文件及源码发布产物
+.env
+.env.*
+dist/
+*.log.*
+*.tmp
+
+# Local credentials, captures, exports and device build artifacts
+*.pem
+*.key
+*.p12
+*.pfx
+*.pcap
+*.pcapng
+*.btsnoop
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db-journal
+*.env
+!.env.example
+exports/
+backups/
+*.zip

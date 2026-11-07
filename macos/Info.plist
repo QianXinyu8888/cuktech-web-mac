@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>org.cuktech.web.launcher</string>
+<key>CFBundleExecutable</key><string>Launcher</string>
+<key>CFBundleName</key><string>酷态站</string>
+<key>CFBundleDisplayName</key><string>酷态站</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSMinimumSystemVersion</key><string>12.3</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>通过蓝牙连接自己的酷态科充电器并显示充电数据。</string>
+</dict></plist>

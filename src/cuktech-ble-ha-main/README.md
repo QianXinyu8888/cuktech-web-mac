@@ -1,0 +1,433 @@
+# CUKTECH 10 GaN Charger Ultra - Home Assistant Integration
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-green.svg)](https://www.home-assistant.io/)
+
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kairui1108&repository=cuktech-ble-ha-integration&category=integration)
+[![Add integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=cuktech_charger)
+
+通过 BLE（低功耗蓝牙）将 CUKTECH 10 GaN Charger Ultra 充电器接入 Home Assistant，实现实时功率监控、端口控制和自动化。
+
+支持两种网关方案：**Python BLE Server**（运行在 Linux/Docker）或 **ESP32 BLE Bridge**（独立硬件）。
+
+
+## 功能特性
+
+### BLE Server（Python）
+- **实时功率监控**：通过 SSE 事件流推送电压、电流、功率数据至 Web 前端，MQTT 推送至 HA
+- **SSE 事件流**：Server-Sent Events 实时推送端口数据、状态变更、设置更新，替代 2s 轮询
+- **功率曲线图**：Web UI 实时显示各端口及总功率曲线
+- **端口控制**：远程开关 C1/C2/C3/A 端口
+- **协议开关控制**：独立控制各端口的 PD/PPS/UFCS/SCP 协议开关
+- **倒计时设置**：为每个端口设置充电倒计时（支持自定义分钟数）
+- **设置管理**：场景模式、息屏时间、语言等设置
+- **BLE 自动重连**：断开后自动重连，指数退避策略
+- **MQTT LWT**：崩溃时自动通知 HA 设备离线
+- **巴法云 (Bemfa) 接入**：支持小爱同学/小度音箱语音控制充电器端口
+- **充电记录**：自动记录充电会话（电量、时长、峰值功率），支持 Web UI 历史查看
+- **限额充电**：支持每端口设置电量上限，到额自动断电；
+- **SQLite 历史数据**：端口数据持久化存储，支持统计和导出
+
+### ESP32 固件
+- **独立硬件**：ESP32 直连充电器，无需主机
+- **Web 配置**：首次启动 AP 配网模式，浏览器配置凭据
+- **Web 仪表盘**：实时端口电压/电流/功率
+- **端口控制**：Web 或 MQTT 控制各端口
+- **协议开关**：独立开关 PD / PPS / UFCS / SCP
+- **场景模式切换**
+- **HTTP OTA 更新**
+- **巴法云 (Bemfa) 接入**：支持小爱同学/小度音箱语音控制
+- **支持芯片**：ESP32 / ESP32-S3 / ESP32-C3
+- 👉 **[cuktech-ble-esp32](https://github.com/kairui1108/cuktech-ble-esp32)** — 固件下载
+
+### HA Integration
+- **BLE 连接控制**：开关实体控制 BLE 连接/断开，二进制传感器显示连接状态
+- **端口传感器**：电压、电流、功率、协议类型
+- **端口控制**：开关控制 C1/C2/C3/A 端口
+- **协议开关控制**：10 个开关实体，独立控制各端口 PD/PPS/UFCS/SCP 协议
+- **限额充电**：支持每端口设置电量上限，到额自动断电，兼容esp32端
+- **倒计时设置**：数字实体控制各端口充电倒计时
+- **设备信息同步**：型号、固件版本从 BLE 服务器实时同步
+- **充电事件**：充电完成时自动触发事件实体，支持通知自动化
+
+### Web 管理界面
+- **SSE 实时推送**：端口数据、状态变更通过 SSE 事件流即时更新，无轮询延迟
+- 实时功率曲线图（各端口 + 总功率）
+- 充电记录历史查看（会话详情、功率曲线）
+- 端口开关控制
+- BLE 连接/断开控制
+- 设备设置管理
+- 倒计时设置（支持自定义和快捷选择）
+- **Web 配置页面**：在线修改配置，米家扫码自动获取设备信息，敏感信息脱敏
+- **BLE 连接质量**：悬浮查看连接评分、解密率、连接时长、重连次数等指标
+- 日志级别管理
+
+### 已知限制
+
+- **单设备**：当前架构仅支持同时连接一个充电器
+- **协议检测**：协议显示以固件推送（PIID 17/18，与米家 App 一致）为准，协商变更时即时更新；仅在极端冷启动（PIID 17 从未收到且读取失败）时降级为基于电压的粗略推断
+- **平台支持（Python BLE Server）**：开发与测试基于 Linux 环境
+
+## 架构说明
+
+```
+┌─────────────────┐     ┌─────────────────────┐     ┌─────────────────┐
+│  CUKTECH 10 GaN │───▶│   BLE Gateway       │───▶│  Home Assistant │
+│     Charger     │ BLE │  (Python / ESP32)   │ MQTT│    Integration  │
+└─────────────────┘     └─────────────────────┘     └─────────────────┘
+                              │
+                              │ HTTP API / Web UI
+                              ▼
+                        ┌─────────────┐
+                        │  Web 界面   │
+                        └─────────────┘
+```
+
+- **BLE Server**（Python）：运行在 Linux/Docker 主机上，功能完整（含历史数据）
+- **ESP32 固件**：独立运行在 ESP32 上，低功耗、低成本
+- **HA Integration**：订阅 MQTT 数据，两条路径通用
+
+## 目录结构
+
+```
+cuktech-ble-ha/
+├── ble_server/                    # BLE 服务端
+│   ├── src/cuktech_ble/
+│   │   ├── protocol.py            # BLE 协议常量和工具
+│   │   ├── controller.py          # BLE 连接和命令处理
+│   │   └── cli.py                 # CLI 用户界面
+│   ├── ha_server.py               # HTTP API + MQTT 服务
+│   ├── ble_manager.py             # BLE 连接管理
+│   ├── state.py                   # 状态管理
+│   ├── state_protocol_v2.py       # 协议检测引擎 V2
+│   ├── history.py                 # SQLite 历史数据
+│   ├── config.py                  # 配置（支持 YAML）
+│   ├── bemfa_client.py            # 巴法云 MQTT 客户端（小爱/小度）
+│   ├── config.yaml.example        # 配置模板
+│   ├── check_env.sh               # 环境检查脚本
+│   ├── cuktech_ctl.sh             # 服务控制脚本
+│   ├── web/
+│   │   ├── index.html             # 桌面端 Web 界面
+│   │   ├── phone.html             # 移动端 Web 界面
+│   │   └── static/                # 前端资源 (JS/CSS/图片)
+│   ├── docker/                    # Docker 部署文件
+│   ├── tests/                     # 单元测试 (364 tests)
+│   └── systemd/                   # systemd 服务配置
+│
+├── ha_integration/                # HA 自定义集成
+│   └── custom_components/cuktech_charger/
+│       ├── __init__.py            # Coordinator（含限额后端探测/委托/本地执行）
+│       ├── binary_sensor.py       # 端口状态 + BLE 连接状态
+│       ├── config_flow.py         # 配置流程（支持 reauth）
+│       ├── const.py               # 常量定义
+│       ├── energy_engine.py       # 充电量限额引擎（计量/会话检测/限额追踪，纯函数）
+│       ├── manifest.json
+│       ├── number.py              # 倒计时 + 充电量限额数字实体
+│       ├── select.py              # 选择器实体（含限额模式）
+│       ├── sensor.py              # 传感器实体（含会话电量）
+│       ├── switch.py              # 开关实体 + BLE 连接控制
+│       ├── strings.json           # 英文翻译
+│       ├── translations/          # 多语言翻译
+│       ├── brand/                 # HACS 品牌图标
+│       └── icon.png
+│
+├── esp32_ble/                     # ESP32 固件
+│   ├── main/
+│       ├── main.c                 # WiFi/MQTT/HTTP/OTA
+│       ├── ble_manager.c          # BLE 状态机 + 异步命令
+│       └── ...
+│
+├── docs/                          # 文档
+│   ├── server-readme.md
+│   ├── server-readme-en.md
+│   ├── integration-readme.md
+│   ├── integration-readme-en.md
+│   ├── esp32-readme.md
+│   ├── esp32-readme-en.md
+│   └── tools/                     # CLI 测试工具
+│
+├── LICENSE
+├── README.md
+├── RELEASE_NOTES.md
+└── bump-version.sh
+```
+
+## Docker 部署
+
+Docker 部署无需安装 Python 依赖，只需确保宿主机已安装 Docker 和蓝牙适配器。
+
+镜像内置默认 `config.yaml`（来自 `config.yaml.example`），首次启动无需配置文件。
+
+**推荐方式（数据持久化）：**
+
+```bash
+# 创建数据目录
+mkdir -p data
+
+# 运行容器
+docker run -d \
+  --name cuktech-ble \
+  --network host \
+  --privileged \
+  --restart unless-stopped \
+  -v $(pwd)/data:/data \
+  -v /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro \
+  -e CUKTECH_CONFIG_PATH=/data/config.yaml \
+  -e CUKTECH_HISTORY_DB_PATH=/data/port_history.db \
+  ghcr.io/kairui1108/cuktech-ble-server:latest
+
+# 访问 http://<服务器IP>:8199/config.html 通过 Web 页面配置
+# 配置会自动保存到 ./data/config.yaml，重启后保留
+```
+
+> 配置通过 Web 页面修改后会自动写入 `./data/config.yaml`，容器重启或重建后配置不丢失。
+
+**使用环境变量（不依赖配置文件）：**
+
+```bash
+docker run -d \
+  --name cuktech-ble \
+  --network host \
+  --privileged \
+  --restart unless-stopped \
+  -v /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro \
+  -v $(pwd)/data:/data \
+  -e CUKTECH_CONFIG_PATH=/data/config.yaml \
+  -e CUKTECH_HISTORY_DB_PATH=/data/port_history.db \
+  -e CUKTECH_DEVICE_MAC=XX:XX:XX:XX:XX:XX \
+  -e CUKTECH_DEVICE_TOKEN=your_token_12bytes_hex \
+  -e CUKTECH_DEVICE_BLE_KEY=your_ble_key_16bytes_hex \
+  -e MQTT_ENABLED=false \
+  ghcr.io/kairui1108/cuktech-ble-server:latest
+```
+
+**Docker Compose：**
+
+```bash
+git clone https://github.com/kairui1108/cuktech-ble-ha.git
+cd cuktech-ble-ha/ble_server
+
+# 快速启动（配置通过 config.html 在线修改）
+docker compose -f docker/docker-compose.pull.yml up -d
+
+# 或者使用环境变量方式（无需创建配置文件）
+# 编辑 docker-compose.env.yml 填入你的设备信息
+docker compose -f docker/docker-compose.env.yml up -d
+```
+
+## 安装步骤
+
+### 1. 获取设备 Token 和 BLE Key
+
+**方式一：Web 配置页面（推荐，最简单）**
+
+启动服务后访问 `http://<服务器IP>:8199/config.html`，点击「登录米家账号自动获取」用米家 App 扫码即可自动获取。
+
+**方式二：命令行工具**
+
+使用 [Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) 从米家云端获取设备信息：
+
+```bash
+pip install xiaomi_cloud_tokens_extractor
+python -m xiaomi_cloud_tokens_extractor
+```
+
+选择你的 CUKTECH 充电器，获取：
+- `MAC` - 设备蓝牙 MAC 地址
+- `Token` - 设备 Token（12 字节 hex）
+- `BLE Key` - BLE 认证密钥（16 字节 hex）
+
+### 2. 检查环境
+
+```bash
+cd ble_server
+./check_env.sh
+```
+
+确认 Python、蓝牙适配器、BLE 支持等全部通过。
+
+### 3. 部署 BLE Server
+
+```bash
+cd ble_server
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+#### 配置方式（三选一）
+
+**方式 A：Web 配置页面（推荐）**
+
+启动服务后访问 `http://<服务器IP>:8199/config.html`，在线修改所有配置，支持米家扫码获取设备信息。
+
+**方式 B：YAML 配置文件**
+
+```bash
+cp config.yaml.example config.yaml
+# 编辑 config.yaml 填入你的配置
+```
+
+**方式 C：环境变量**
+
+```bash
+export CUKTECH_DEVICE_MAC="XX:XX:XX:XX:XX:XX"
+export CUKTECH_DEVICE_TOKEN="your_token_here"
+export CUKTECH_DEVICE_BLE_KEY="your_ble_key_here"
+export MQTT_HOST="your_mqtt_broker"
+export MQTT_PORT="1883"
+export MQTT_USER="your_username"
+export MQTT_PASS="your_password"
+```
+
+> 优先级：环境变量 > config.yaml
+
+```bash
+./cuktech_ctl.sh start
+```
+
+### 4. 安装 HA 集成
+
+**方式 A：HACS 安装（推荐）**
+
+1. 点击上方 **[Open in HACS]** 按钮，将本仓库添加为自定义集成
+2. 安装后重启 Home Assistant
+3. 点击 **[Add integration]** 按钮，搜索 "CUKTECH Charger" 添加
+
+**方式 B：手动安装**
+
+```bash
+cp -r ha_integration/custom_components/cuktech_charger /config/custom_components/
+```
+
+重启 Home Assistant。
+
+## 实体说明
+
+| 实体类型 | 实体名 | 功能 |
+|----------|--------|------|
+| switch | 连接控制 | BLE 连接/断开 |
+| binary_sensor | 连接状态 | BLE 连接状态 |
+| sensor | 端口电压/电流/功率 | 实时监控 |
+| sensor | 端口协议 | PD/QC/USB-A |
+| sensor | 总功率 | 所有端口功率之和 |
+| switch | 端口控制 | 开关 C1/C2/C3/A |
+| switch | 协议开关 (×10) | 独立控制各端口 PD/PPS/UFCS/SCP |
+| number | 充电量限额 (×4) | 每端口 Wh 上限，0 关闭，到额自动断电 |
+| select | 限额模式 (×4) | once（单次）/ always（每次会话） |
+| sensor | 会话电量 (×4) | 本次充电电量，带剩余额度、限额模式等属性 |
+| select | 场景模式 | AI/数码/单口/均衡 |
+| select | 息屏时间 | 5分钟/1分钟/10分钟等 |
+| number | 倒计时 | 各端口充电倒计时 |
+
+## API 接口
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/events` | GET | SSE 事件流（端口数据、状态、设置实时推送） |
+| `/api/status` | GET | 获取充电器状态 |
+| `/api/enable` | POST | 启用/禁用 BLE 连接 |
+| `/api/set` | POST | 设置 PIID 值 |
+| `/api/port` | POST | 控制端口开关 |
+| `/api/protocol` | POST | 控制协议开关（toggle/set/bulk/value） |
+| `/api/chart` | GET | 获取图表数据 |
+| `/api/history/{port}` | GET | 查询历史数据 |
+| `/api/statistics/{port}` | GET | 统计分析 |
+| `/api/export/{port}` | GET | CSV 导出 |
+| `/api/charge-limits` | GET/POST | 充电量限额读写（HA 集成委托模式对接端点） |
+| `/api/log-level` | GET/POST | 日志级别管理 |
+| `/api/devices` | GET | 设备清单（多设备发现；单设备返回 1 台） |
+
+**多设备寻址（可选）**：所有端点都支持 `?device=<id>`，也支持路径形式
+`/api/device/<id>/…`（HA 集成用路径形式，因为 404 可探测回退）。不传 = primary，
+老调用方行为完全不变。
+
+## MQTT 主题
+
+| 主题 | 说明 |
+|------|------|
+| `cuktech/charger/port/{c1\|c2\|c3\|a}` | 端口数据（retain） |
+| `cuktech/charger/settings` | 设置数据（retain） |
+| `cuktech/charger/status` | 连接状态（retain + LWT） |
+| `cuktech/charger/set` | 设置命令（订阅） |
+| `cuktech/charger/port` | 端口控制命令（订阅）；Python 服务端与 ESP32 固件均订阅，充电量限额断电亦复用此主题 |
+
+配置了 `devices:` 之后，每台附加设备使用自己的前缀 `{topic_prefix}/{device_id}`
+（或该设备显式配置的 `topic_prefix`），叶子主题形状不变——也就是 ESP32 固件
+"每台设备配不同前缀"的接入方式原样适用；primary 永远是 `cuktech/charger`。
+
+## 多设备（同一块网卡接多台充电器）
+
+`config.yaml` 加一个 `devices:` 节即可（不写 = 单设备，行为与以前逐字节一致）。
+架构与取舍见 [docs/multi-device-design.md](docs/multi-device-design.md)：
+
+```yaml
+ble:                       # 永远是 primary，device_id 固定为 default
+  mac: "AA:BB:CC:DD:EE:01"
+  token: "..."
+
+devices:
+  - id: desk               # topic 后缀兼设备标识
+    name: "书桌充电器"
+    mac: "AA:BB:CC:DD:EE:02"
+    token: "..."
+```
+
+- 每台设备独立的 BLE 连接/状态/会话/限额/历史（`history.db` 里按 `device_id` 分区，
+  老库升级自动归到 primary，曲线无缝保留）；
+- 一台故障只重建那一台：`AdapterCoordinator` 分级恢复（L1 断开 → L1.5 清 BlueZ
+  缓存 → L2 适配器下电，仅当只有一台或全员离线时才下电）；
+- 认证连续失败 3 次直接升级 L3 重建 BLE 会话（单设备＝进程重启，多设备＝那台的
+  进程内重建），前面只做 30s/60s 两次快重试；一小时最多重建 3 次，超出后改为
+  10 分钟慢退避 + `device_session_stuck` 状态并提示断电重插/检查 token（真机实测：
+  链路硬断后设备会重放旧 session 数据，进程内重试一次都救不回来，换新进程 30 秒即好）；
+- Web UI 出现设备切换器（单设备时隐藏），HA 集成里"一设备一 entry"；
+- 回滚：`./cuktech_ctl.sh history-down`（非 primary 历史归档，幂等）+ `clean-retained`。
+
+> **状态：多设备能力标 Beta。** 单设备路径有逐字节 golden 快照与既有回归锁定，
+> 多设备软件链路（注册/路由/SSE/MQTT/DB/限额/UI/HA）由虚拟充电器与多 entry 测试
+> 覆盖；但"两台真实充电器并发认证、互相干扰"只能在 P5 真机 canary（需要第二台
+> 硬件，连续 72h）通过后解除 Beta 标注。单设备用户不受影响。
+
+## 依赖
+
+### BLE Server
+- Python 3.10+
+- bleak >= 0.21
+- paho-mqtt >= 2.0
+- aiohttp >= 3.9
+- cryptography >= 41
+- pyyaml >= 6.0
+- requests >= 2.31
+
+### HA Integration
+- Home Assistant 2024.1+
+- MQTT（集成依赖）
+
+## 测试
+
+```bash
+# BLE Server (364 tests)
+cd ble_server && .venv/bin/python -m pytest tests/
+
+# HA Integration (239 tests)
+cd ha_integration && python -m pytest tests/
+```
+
+## 效果预览
+
+公开源码不附带真实充电记录截图。
+
+## 许可证
+
+MIT License - 详见 [LICENSE](LICENSE) 文件
+
+## 致谢
+
+- [cuktech-ble-controller](https://github.com/zhyzhaogit/cuktech-ble-controller) - BLE 协议参考实现
+- [ha-cuk-ble](https://github.com/zuyan9/ha-cuk-ble) - 协议检测参考
+- [Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) - 小米设备 Token 提取工具
+- [bleak](https://github.com/hbldh/bleak) - BLE 通信库
+- [paho-mqtt](https://eclipse.dev/paho/) - MQTT 客户端

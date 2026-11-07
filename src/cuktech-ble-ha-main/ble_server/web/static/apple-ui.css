@@ -1,0 +1,309 @@
+/* Shared presentation layer. Device state, controls and requests stay in their
+   original modules. Keep the public CSS tokens consumed by canvas charts. */
+:root {
+    --apple-page: #f5f6f8;
+    --apple-surface: #ffffff;
+    --apple-sidebar: #fafafb;
+    --apple-inset: #f7f8fa;
+    --apple-border: #e9ecf1;
+    --apple-ink: #202126;
+    --apple-secondary: #626975;
+    --apple-muted: #727986;
+    --apple-blue: #007aff;
+    --apple-blue-ink: #0062cc;
+    --apple-shadow: 0 4px 16px -9px rgba(24, 34, 55, .14), 0 1px 3px rgba(24, 34, 55, .025);
+    --apple-lift-shadow: 0 10px 24px -12px rgba(24, 34, 55, .19);
+    --apple-sidebar-width: 176px;
+}
+
+html[data-appearance="dark"],
+body.config-page:not(.light),
+body:has(> .phone):not(.light) {
+    --apple-page: #17181c;
+    --apple-surface: #222328;
+    --apple-sidebar: #1c1d22;
+    --apple-inset: #2b2d33;
+    --apple-border: #34363f;
+    --apple-ink: #f2f3f7;
+    --apple-secondary: #c1c4cd;
+    --apple-muted: #a3a8b4;
+    --apple-blue: #409cff;
+    --apple-blue-ink: #9bcaff;
+    --apple-shadow: 0 4px 15px rgba(0, 0, 0, .09);
+    --apple-lift-shadow: 0 10px 24px rgba(0, 0, 0, .16);
+}
+
+:root,
+html[data-appearance],
+body.light,
+body.config-page,
+body:has(> .phone) {
+    --bg: var(--apple-page);
+    --card-bg: var(--apple-surface);
+    --card-border: var(--apple-border);
+    --text: var(--apple-ink);
+    --text-sub: var(--apple-secondary);
+    --text-dim: var(--apple-muted);
+    --accent: var(--apple-blue);
+    --accent-ink: var(--apple-blue-ink);
+    --accent-rgb: 0, 122, 255;
+    --action-rgb: 0, 122, 255;
+    --action-ink: var(--apple-blue-ink);
+    --card-inset-bg: var(--apple-inset);
+    --card-inset-border: var(--apple-border);
+    --card-inset-shadow: none;
+    --card-hover-bg: var(--apple-inset);
+    --shadow-card: var(--apple-shadow);
+    --shadow-lift: var(--apple-lift-shadow);
+    --r-card: 20px;
+    --r-hero: 24px;
+    --r-inset: 14px;
+    --r-ctl: 10px;
+    --seg-border: transparent;
+    --seg-track: var(--apple-inset);
+    --seg-thumb: var(--apple-surface);
+    --total-line: var(--apple-blue);
+    --total-fill: rgba(0, 122, 255, .10);
+    --divider: var(--apple-border);
+    --deck-dot-edge: var(--apple-border);
+    --deck-dot-fill: var(--apple-muted);
+    --dur-fast: 150ms;
+    --dur: 180ms;
+}
+
+html { scroll-behavior: smooth; scroll-padding-top: 118px; }
+body {
+    background: var(--apple-page);
+    color: var(--apple-ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+button, select, input, textarea { font-family: inherit; }
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--apple-blue); outline-offset: 3px; }
+[hidden] { display: none !important; }
+
+/* Desktop application shell */
+.apple-console { padding-left: var(--apple-sidebar-width); }
+.apple-sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 60;
+    width: var(--apple-sidebar-width); background: var(--apple-sidebar);
+    border-right: 1px solid var(--apple-border); padding: 32px 13px 24px;
+    display: flex; flex-direction: column; gap: 32px;
+}
+.apple-wordmark { display: flex; align-items: center; gap: 8px; padding: 0 8px; font-size: 13px; font-weight: 650; letter-spacing: -.4px; }
+.apple-wordmark::after { content: ""; width: 6px; height: 6px; background: var(--apple-blue); border-radius: 2px; }
+.apple-sidebar nav { display: grid; gap: 7px; }
+.apple-sidebar nav a {
+    display: flex; align-items: center; gap: 10px; min-height: 42px;
+    padding: 10px 12px; border-radius: 10px; color: var(--apple-secondary);
+    font-size: 12px; text-decoration: none;
+    transition: background 180ms ease, color 180ms ease;
+}
+.apple-sidebar nav a[aria-current] { background: rgba(0, 122, 255, .07); color: var(--apple-blue-ink); font-weight: 500; }
+.apple-sidebar nav a:hover { background: var(--apple-inset); color: var(--apple-ink); }
+.apple-sidebar .ic { width: 16px; height: 16px; }
+.apple-sidebar-meta { margin-top: auto; border-top: 1px solid var(--apple-border); padding: 18px 12px 0; color: var(--apple-muted); font-size: 11px; line-height: 1.8; }
+.apple-sidebar-meta span { display: block; font-size: 10px; }
+.apple-console .wrap { max-width: 1300px; padding-left: 28px; padding-right: 28px; }
+.apple-console .topbar { background: var(--apple-page); border-bottom: 1px solid var(--apple-border); }
+.apple-console .topbar-inner { min-height: 66px; padding-top: 12px; padding-bottom: 12px; gap: 12px; }
+.connection-feedback { border-color: var(--apple-border); background: var(--apple-surface); color: var(--apple-secondary); border-radius: 12px; }
+.apple-console .brand > span:first-of-type { font-size: 12px !important; font-weight: 500 !important; color: var(--apple-secondary); }
+.apple-console .hdr-model { font-size: 11px; color: var(--apple-muted); }
+.apple-console .fw-chip { font-size: 11px; }
+.apple-console .topbar-status { gap: 10px; }
+.apple-console .topbar-status .status-badge { font-size: 11px; padding: 0 5px; }
+.apple-console .topbar-status .btn { border-radius: 9px; height: 32px; font-size: 11px; }
+.apple-console .tool-btn { background: var(--apple-surface); border: 1px solid var(--apple-border); font-size: 11px; height: 32px; }
+.apple-console .page { padding-top: 28px; }
+.apple-page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 24px; }
+.apple-page-heading h1 { font-size: 28px; font-weight: 600; line-height: 1.3; letter-spacing: -.8px; margin: 0; }
+.apple-page-heading p { color: var(--apple-muted); font-size: 12px; margin: 7px 0 0; }
+.apple-mobile-link { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--apple-secondary); white-space: nowrap; }
+.apple-console .page-grid { gap: 20px; align-items: start; }
+.apple-console .col-main, .apple-console .col-side { gap: 20px; justify-content: flex-start; }
+.apple-console .card { padding: 22px; }
+.card { border-color: var(--apple-border); box-shadow: var(--apple-shadow); }
+.apple-console .card-title { color: var(--apple-ink); font-size: 14px; font-weight: 500; margin-bottom: 20px; }
+.apple-console .card-note { font-size: 11px; line-height: 1.7; }
+.apple-console .card-top { padding: 24px 20px; }
+.apple-console .top-main { grid-template-columns: minmax(0, .95fr) minmax(0, 1.25fr); gap: 20px; align-items: center; }
+.apple-console .device-col { max-width: 300px; margin: 0 auto; width: 100%; }
+.apple-console .device-stage { min-height: 252px; --device-scale: .68; }
+.apple-console .port-grid { gap: 12px; }
+.apple-console .port-card { background: var(--apple-inset); border: 1px solid transparent; box-shadow: none; padding: 15px 12px; }
+.apple-console .port-card.active { border-color: transparent; }
+.apple-console .port-card.is-charging { border-color: var(--apple-border); background: var(--apple-surface); box-shadow: var(--apple-shadow); }
+.apple-console .port-card:hover { transform: translateY(-1px); border-color: var(--apple-border); box-shadow: var(--apple-shadow); }
+.apple-console .port-name { font-size: 12px; }
+.apple-console .port-power-value { font-size: 27px; font-weight: 500; letter-spacing: -.8px; }
+.apple-console .port-va { font-size: 11px; }
+.apple-console .port-load-track { border: 0; }
+.apple-console .chart-container { height: 250px; }
+.apple-console .scene-btn img { width: 47px; height: 47px; }
+.apple-console .scene-label { font-size: 11px; }
+.apple-console .scene-desc { font-size: 11px; line-height: 1.6; margin-top: 12px; }
+.apple-console .scene-current { font-size: 12px; }
+.apple-console .rate-number { font-weight: 500; letter-spacing: -1.6px; }
+.apple-console .countdown-port, .apple-console .charge-limit-item { border-radius: 14px; box-shadow: none; }
+.apple-console .bench-card { border-color: var(--apple-border); box-shadow: var(--apple-shadow); }
+.apple-console #deviceSwitcher { min-width: 0; width: 100%; }
+.apple-console .bench-stack, .apple-console .bench-deck { min-width: 0; max-width: 100%; }
+.apple-console .bench-tile { min-width: 0; max-width: 100%; }
+.apple-console .bench-card::before { border-color: var(--apple-border); }
+.apple-console .theme-menu { background: var(--apple-surface); border-color: var(--apple-border); border-radius: 14px; }
+.apple-console .settings-modal, .apple-console .modal, .apple-console .sd-sheet { background: var(--apple-surface); border-color: var(--apple-border); border-radius: 22px; }
+.apple-console .settings-grid { gap: 0 24px; }
+.apple-console .setting-item { border-color: var(--apple-border); }
+.apple-console .footer-note { font-size: 11px; }
+.apple-console .card:target { outline: 2px solid rgba(0, 122, 255, .25); outline-offset: 5px; }
+
+/* Shared controls retain their original geometry and event targets. */
+.toggle input:checked + .toggle-slider { background: var(--apple-blue); }
+.port-toggle input:checked + .toggle-slider { background: var(--apple-blue); }
+.toggle-slider { box-shadow: none; }
+.apple-console .segmented { border-color: transparent; background: var(--apple-inset); padding: 3px; }
+.apple-console .time-btn { font-size: 11px; }
+.apple-console select, .apple-console .mini-select { background-color: var(--apple-inset); border-color: var(--apple-border); color: var(--apple-secondary); font-size: 11px; }
+.apple-console .btn-quiet { color: var(--apple-secondary); font-weight: 400; }
+.apple-console .topbar-status .btn-primary { background: var(--apple-blue); border-color: var(--apple-blue); color: #fff; }
+.apple-console .topbar-status .btn-danger { background: var(--apple-surface); border-color: var(--apple-border); color: var(--danger); }
+.apple-console .charge-limit-set, .apple-console .countdown-set { border-radius: 9px; }
+
+/* Mobile device page: the product animation and every original section stay. */
+body:has(> .phone) { background: var(--apple-page); }
+.phone { max-width: 480px; background: var(--apple-page); padding-bottom: 48px; }
+.phone .navbar { max-width: 480px; height: 58px; background: var(--apple-page); border-radius: 0; border-bottom: 1px solid var(--apple-border); }
+.phone .nav-title { font-size: 15px; font-weight: 500; }
+.phone .top-view { top: 58px; height: 320px; }
+.phone .bottom-view { padding: 0 16px; background: var(--apple-page); }
+.phone .card { border-radius: 22px; padding: 22px; border-color: var(--apple-border); box-shadow: var(--apple-shadow); }
+.phone .scene-card-title, .phone .scene-card-subtitle, .phone .screen-card-title, .phone .trickle-card-title { font-size: 15px; }
+.phone .scene-card-header { margin-bottom: 24px; }
+.phone .scene-button img { filter: none; }
+.phone .scene-buttons { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+.phone .scene-btn { min-width: 0; width: 100%; }
+.phone .scene-btn img { width: 100%; max-width: 65px; height: auto; aspect-ratio: 1; }
+.phone .scene-label { font-size: 12px; }
+.phone .screen-card-value { font-size: 13px; }
+.phone .rate-card { padding: 0; }
+.phone .rate-inner { padding: 25px 22px; }
+.phone .port-ctl-card { padding: 22px; }
+.phone .port-ctl-label { font-size: 13px; }
+.phone .port-ctl-item { min-width: 0; flex-basis: calc(50% - 5px); }
+.phone .rate-inner > div:has(> #portPowerC1Row) { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+.phone .port-power-row { flex-wrap: wrap; row-gap: 3px; }
+.phone .port-power-w { min-width: 0; }
+.phone .port-power-protocol { margin-left: 5px; }
+.phone .connect-btn { border-radius: 12px; }
+.phone .scene-separator { background: var(--apple-border); }
+.phone .dev-menu { background: var(--apple-surface); border-color: var(--apple-border); box-shadow: var(--apple-lift-shadow); }
+
+/* Full-width configuration page. Its existing two-column forms are retained. */
+.config-page .config-app { max-width: 1240px; }
+.config-page .config-app .navbar { background: var(--apple-page); border-color: var(--apple-border); height: 76px; }
+.config-page .config-app .nav-title { font-size: 21px; font-weight: 600; letter-spacing: -.5px; }
+.config-page .config-content { padding: 28px; gap: 22px; }
+.config-page .config-content .config-section { padding: 24px; border-radius: 22px; }
+.config-page .config-section-title { color: var(--apple-ink); font-weight: 500; letter-spacing: 0; font-size: 14px; }
+.config-page .config-label { font-size: 13px; }
+.config-page .config-hint { font-size: 11px; color: var(--apple-muted); }
+.config-page .config-input, .config-page.light .config-input { background: var(--apple-inset); border-color: var(--apple-border); font-size: 13px; border-radius: 9px; }
+.config-page .device-card { background: var(--apple-inset); border-color: var(--apple-border); border-radius: 14px; }
+.config-page .device-card.is-editing { background: var(--apple-surface); border-color: var(--apple-blue); }
+.config-page .device-card-name { font-size: 13px; }
+.config-page .device-card-btn, .config-page.light .device-card-btn { background: var(--apple-surface); border-color: var(--apple-border); border-radius: 8px; }
+.config-page .device-add-btn { border-color: var(--apple-border); font-size: 12px; font-weight: 500; border-radius: 10px; }
+.config-page .btn-save { background: var(--apple-blue); font-size: 13px; font-weight: 500; border-radius: 11px; }
+.config-page .config-actions { border-color: var(--apple-border); border-radius: 18px; box-shadow: var(--apple-lift-shadow); }
+.config-page .mini-btn { border-color: var(--apple-border); background: var(--apple-inset); color: var(--apple-secondary); }
+.config-page .xm-modal { border-color: var(--apple-border); background: var(--apple-surface); border-radius: 22px; }
+
+@media (min-width: 1180px) {
+    .apple-console .page-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+}
+@media (min-width: 1024px) and (max-width: 1179px) {
+    .apple-console .page-grid { grid-template-columns: minmax(0, 1fr) 270px; gap: 16px; }
+    .apple-console .top-main { grid-template-columns: 1fr; }
+    .apple-console .card { padding: 19px; }
+    .apple-console .device-stage { min-height: 225px; --device-scale: .61; }
+}
+@media (max-width: 1100px) {
+    .apple-console .hdr-model { display: none; }
+    .apple-console .topbar-inner { flex-wrap: wrap; }
+    .apple-console .topbar-status { order: 3; flex-basis: 100%; justify-content: space-between; }
+    .apple-console .topbar-tools { margin-left: auto; }
+}
+@media (max-width: 1023px) {
+    .apple-console .page-grid { grid-template-columns: minmax(0, 1fr); }
+    .apple-console .top-main { grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); }
+    .apple-console .col-side { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+    .apple-console #deviceSwitcher, .apple-console #cardScene { grid-column: 1 / -1; }
+    .apple-console #cardLimit, .apple-console #cardCountdown { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+    html { scroll-padding-top: 150px; }
+    .apple-console { padding-left: 0; }
+    .apple-sidebar { position: relative; inset: auto; width: 100%; padding: 15px 18px 12px; border-right: 0; border-bottom: 1px solid var(--apple-border); gap: 14px; }
+    .apple-wordmark { padding: 0 2px; font-size: 16px; }
+    .apple-sidebar nav { display: flex; flex-wrap: wrap; gap: 5px; }
+    .apple-sidebar nav a { padding: 8px 10px; font-size: 11px; min-height: 36px; }
+    .apple-sidebar nav a .ic { width: 14px; height: 14px; }
+    .apple-sidebar-meta { display: none; }
+    .apple-console .wrap { padding-left: 18px; padding-right: 18px; }
+    .apple-console .topbar-inner { min-height: 54px; padding-top: 9px; padding-bottom: 9px; }
+    .apple-console .page { padding-top: 23px; }
+    .apple-page-heading { margin-bottom: 21px; }
+    .apple-page-heading h1 { font-size: 25px; }
+    .apple-console .col-main, .apple-console .col-side { gap: 16px; }
+    .apple-console .card { padding: 20px; }
+    .apple-console .card-title { font-size: 13px; }
+    .apple-console .top-main { gap: 14px; }
+    .apple-console .device-stage { --device-scale: .6; min-height: 220px; }
+    .apple-console .device-col { max-width: 240px; }
+}
+@media (max-width: 480px) {
+    .apple-console .wrap { padding-left: 13px; padding-right: 13px; }
+    .apple-console .top-main { grid-template-columns: 1fr; }
+    .apple-console .device-col { max-width: 300px; }
+    .apple-console .device-stage { --device-scale: .66; min-height: 242px; }
+    .apple-console .card { padding: 18px 16px; }
+    .apple-console .col-side { display: flex; }
+    .apple-console .card-tools { gap: 6px; }
+    .apple-console .topbar-status .status-row { gap: 1px; }
+    .apple-console .topbar-status .btn { padding: 0 10px; }
+    .apple-console .topbar-status .status-badge { font-size: 10px; padding: 0 3px; }
+    .apple-console .port-power-value { font-size: 26px; }
+    .apple-console .card-title .card-tools .segmented { flex-wrap: wrap; }
+    .apple-console .time-btn { min-width: 0; }
+    .apple-console .scene-btn img { width: 46px; height: 46px; }
+    .apple-sidebar { padding: 16px 12px 12px; }
+    .apple-sidebar nav a { font-size: 11px; gap: 6px; padding: 8px; }
+    .apple-page-heading p { font-size: 11px; }
+    .apple-mobile-link { font-size: 10px; }
+    .config-page .config-content { padding: 16px 12px 24px; gap: 15px; }
+    .config-page .config-content .config-section { padding: 20px 16px; }
+    .config-page .config-app .navbar { height: 60px; }
+    .config-page .config-app .nav-title { font-size: 18px; }
+    .phone .card { padding: 21px 18px; }
+    .phone .rate-card { padding: 0; }
+}
+@media (pointer: coarse) {
+    .apple-sidebar nav a { min-height: 44px; }
+    .apple-console .tool-btn { min-height: 36px; }
+    .config-page .config-input { font-size: 16px; }
+}
+@media (max-width: 380px) {
+    .phone .imagebg { width: 360px; max-width: none; left: 50%; margin-left: -180px; margin-right: 0; transform: scale(.78); transform-origin: center top; }
+    .phone .scene-btn .scene-label { font-size: 11px; }
+    .phone .port-ctl-port-icon { width: 25px; }
+    .phone .port-ctl-label { margin-left: 4px; font-size: 12px; }
+    .phone .port-power-name { min-width: 23px; font-size: 12px; }
+    .phone .port-power-dot { width: 8px; height: 8px; margin-right: 5px; }
+    .phone .port-power-w { font-size: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .apple-sidebar nav a { transition: none; }
+}

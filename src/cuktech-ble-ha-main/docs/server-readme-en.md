@@ -1,0 +1,310 @@
+# CUKTECH 10 GaN Charger Ultra - BLE Server
+
+> **[中文](README.md)**
+
+Standalone BLE server for connecting CUKTECH chargers and pushing real-time data to Home Assistant via MQTT.
+
+## Features
+
+- **BLE Connection & MiOT Auth**: Auto-connect charger with reconnection support
+- **BLE Stability**: LL disconnect confirmation, GATT ready wait, exponential backoff
+- **Real-time Data**: SSE event stream pushes port data and status to Web frontend; MQTT push to HA
+- **SSE Event Stream**: Server-Sent Events push real-time port updates, status changes, and setting changes — replaces 2s polling
+- **Protocol Detection**: Auto-detect PD / PD Fixed / PD PPS / QC / USB-A
+- **Web UI**: Real-time charts, port control, settings, Bemfa toggle, 6 themes
+- **Web Config Page**: Online configuration via `config.html`, Xiaomi Cloud QR login for auto device setup
+- **HTTP API**: RESTful endpoints for external systems
+- **MQTT LWT**: Auto-notify HA on crash
+- **Bemfa Cloud**: XiaoAi / DuerOS voice control for charger ports
+- **Charge Sessions & Energy Stats**: Auto-record charge sessions (duration, energy Wh, peak power), view history via Web UI
+- **Energy Integration (Wh)**: Real-time trapezoidal energy accumulation per port
+- **Charge Limit**: Per-port "switch off after N Wh" (`once` one-shot / `always` persistent), configurable from the index/phone UI cards
+- **SQLite History**: Persistent port data with statistics and CSV export
+- **BLE Connection Quality**: Real-time scoring (0-100) with decrypt rate, notification response, stability metrics
+- **Environment Check**: `check_env.sh` for system compatibility
+
+## Requirements
+
+### Docker
+- Linux with Bluetooth adapter
+- Docker + Docker Compose
+
+> Note: Docker Desktop on macOS cannot pass BLE through — on macOS use the native deployment (see notes below).
+
+### Native
+- Python 3.10+
+- Linux with Bluetooth adapter, BlueZ 5.66+ (5.71 recommended)
+- Or macOS (Apple Silicon verified — see notes below)
+- MQTT Broker (EMQX, Mosquitto, etc.)
+
+### macOS notes (darwin branch)
+
+Dedicated darwin code paths (CoreBluetooth) are built in; the full pipeline (MiOT auth, per-port readings, launchd daemon) was verified zero-patch on macOS 26 / Apple Silicon since v1.1.2. Before using:
+
+1. **Bluetooth permission**: the first BLE scan triggers a system prompt — grant access for the terminal running Python (or the `.venv/bin/python` binary for a launchd daemon) under System Settings → Privacy & Security → Bluetooth, otherwise scanning fails silently
+2. **`config.mac` must be the device's real MAC**: the darwin scanner matches devices by reversing the last 6 bytes of the FE95 advertisement — do not use the CoreBluetooth UUID
+3. **No Docker**: containers have no BLE passthrough on macOS; use the native deployment
+4. **Reconnect takes 30-60s**: after a service restart, scanning + backoff + the 5-step handshake need ~30-60s; `connected=false` during this window is normal
+
+```bash
+# Environment check on macOS (check_env.sh supports the darwin branch)
+./check_env.sh
+```
+
+## Quick Start
+
+### Option A: Web Config Page (Easiest)
+
+no manual config file editing needed:
+
+```bash
+git clone https://github.com/kairui1108/cuktech-ble-ha.git
+cd cuktech-ble-ha/ble_server
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+cp config.yaml.example config.yaml
+./cuktech_ctl.sh start
+```
+
+Then open `http://<server-ip>:8199/config.html`:
+1. Click "Get QR Code" → scan with Mi Home app → auto-fill MAC/Token/BLE Key
+2. Fill in MQTT settings (for Home Assistant)
+3. Click "Save & Restart"
+
+### Option B: Docker
+
+#### Run with persistent data directory (recommended):
+
+```bash
+docker run -d \
+  --name cuktech-ble --network host --privileged --restart unless-stopped \
+  -v $(pwd)/data:/data \
+  -v /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro \
+  -e CUKTECH_CONFIG_PATH=/data/config.yaml \
+  -e CUKTECH_HISTORY_DB_PATH=/data/port_history.db \
+  ghcr.io/kairui1108/cuktech-ble-server:latest
+# Then open http://<server-ip>:8199/config.html to configure via web UI
+# All config changes are saved to ./data/config.yaml and persist across restarts
+```
+```
+
+### Docker Compose
+
+```bash
+# Option 1: Clone repo and copy template
+git clone https://github.com/kairui1108/cuktech-ble-ha.git
+cd kuktech-ble-ha/ble_server
+cp config.yaml.example config.yaml
+
+# Option 2: Create config directly (no clone needed)
+cat > config.yaml << 'EOF'
+ble:
+  mac: "XX:XX:XX:XX:XX:XX"
+  token: ""
+  ble_key: ""
+mqtt:
+  enabled: true
+  host: ""
+  port: 1883
+server:
+  port: 8199
+  settings_refresh_interval: 10.0
+EOF
+
+# Start
+docker compose up -d
+```
+
+> **Warning**: If `config.yaml` does not exist when Docker Compose starts, Docker will create a **directory** instead of a file. Use `cp` or `cat` to create a valid file with defaults.
+
+### Build locally
+
+```bash
+cd ble_server
+# use config file to run, edit config.yaml with your device info
+cp config.yaml.example config.yaml
+docker compose -f docker/docker-compose.yml up -d
+
+# use env file to run, edit docker/docker-compose.env.yml with your device info
+docker compose -f docker/docker-compose.env.yml up -d
+```
+
+### Notes on Bluetooth
+
+- Container uses `--network host` to share host network
+- Host D-Bus socket is mounted for BlueZ access
+- `--privileged` is required for BLE hardware access
+- Other Bluetooth applications on host are unaffected
+
+## Quick Start (Native)
+
+### 1. Get Device Token
+
+**Option A: Web Config Page (Recommended)**
+
+After starting the server, open `http://<server-ip>:8199/config.html` and use the Xiaomi Cloud QR login to auto-fetch MAC, Token, and BLE Key.
+
+**Option B: Manual**
+
+```bash
+pip install xiaomi_cloud_tokens_extractor
+python -m xiaomi_cloud_tokens_extractor
+```
+
+### 2. Check Environment
+
+```bash
+./check_env.sh
+```
+
+### 3. Install
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### 4. Configure
+
+```bash
+cp config.yaml.example config.yaml
+# Edit config.yaml with your settings
+```
+
+### 5. Start
+
+```bash
+./cuktech_ctl.sh start
+```
+
+## Service Management
+
+```bash
+./cuktech_ctl.sh start         # Start
+./cuktech_ctl.sh stop          # Stop
+./cuktech_ctl.sh restart       # Restart
+./cuktech_ctl.sh status        # Status
+./cuktech_ctl.sh log [n]       # Last n log lines
+./cuktech_ctl.sh clear-log     # Clear log
+./cuktech_ctl.sh clear-history # Clear history DB
+```
+
+## Web UI
+
+| Page | URL | Description |
+|------|-----|-------------|
+| Dashboard | `http://<IP>:8199/` | Real-time power, port control, protocol control |
+| Mobile | `http://<IP>:8199/phone.html` | Mobile-optimized view |
+| Config | `http://<IP>:8199/config.html` | Online config, Xiaomi Cloud QR login |
+
+- **SSE real-time push**: Port data, status, quality scores delivered via SSE event stream
+- Real-time power charts (Chart.js)
+- Port control (C1/C2/C3/A)
+- BLE connection quality metrics (hover BLE badge)
+- Bemfa voice switches, **one row each** (collapsed by default — tap the title to expand):
+  custom display name + which device + which port (every device can have its own names);
+  "Fill by device" creates N devices x 5 switches at once
+- Switches removed from the config are also deleted from the Bemfa cloud on next start
+  (no dead switches left in the voice assistant)
+- 6 theme options
+
+## MQTT Topics
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `cuktech/charger/port/{c1,c2,c3,a}` | Publish | Port data (JSON, retain) |
+| `cuktech/charger/settings` | Publish | Settings (retain) |
+| `cuktech/charger/status` | Publish | Connection status (retain + LWT) |
+| `cuktech/charger/set` | Subscribe | Set command |
+| `cuktech/charger/port` | Subscribe | Port control command |
+
+## HTTP API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/events` | GET | SSE event stream (port data, status, settings, quality) |
+| `/api/status` | GET | Full charger status |
+| `/api/enable` | POST | Enable/disable BLE `{"enabled": true/false}` |
+| `/api/set` | POST | Set PIID value `{"piid": N, "value": V}` |
+| `/api/port` | POST | Control port `{"port": "c1", "action": "on/off"}` |
+| `/api/protocol` | POST | Control protocol switches |
+| `/api/config` | GET/POST | Read/save configuration |
+| `/api/xiaomi/login` | POST | Xiaomi Cloud QR login |
+| `/api/xiaomi/qr/complete` | POST | Complete QR login |
+| `/api/xiaomi/import` | POST | **Batch** import devices (`dids[]` → name/MAC/token/BLE key each) |
+| `/api/xiaomi/beaconkey` | POST | Get the BLE key of a single device (scripts/debugging) |
+| `/api/log-level` | GET/POST | Log level management |
+| `/api/bemfa` | GET | Bemfa status |
+| `/api/chart` | GET | Chart data |
+| `/api/sessions` | GET | Charge sessions |
+| `/api/energy/stats` | GET | Energy statistics |
+| `/api/charge-limits` | GET/POST | Charge limit (auto power-off at a set Wh) |
+
+### Charge Limit
+
+The threshold is **charger output energy** (Wh, trapezoidal integral of V×I), not
+the energy the device actually absorbs — cable and in-device conversion losses make
+the latter smaller (typically 5–15%).
+
+```bash
+# Switch C1 off after 30 Wh, persistently
+curl -X POST http://localhost:8199/api/charge-limits \
+  -H 'Content-Type: application/json' \
+  -d '{"port":"c1","wh":30,"mode":"always"}'
+
+# Batch set; wh=0 disables the limit for that port
+curl -X POST http://localhost:8199/api/charge-limits \
+  -H 'Content-Type: application/json' \
+  -d '{"limits":{"c1":{"wh":30,"mode":"always"},"a":{"wh":0}}}'
+
+# Query (includes per-port session energy / charging state / fired flag)
+curl http://localhost:8199/api/charge-limits
+```
+
+`mode` semantics:
+
+| mode | Threshold reached | Session ended below it (unplug / manual off / full) | BLE reconnect / restart |
+|---|---|---|---|
+| `once` (default) | Port off, limit cleared | Cleared | Preserved |
+| `always` | Port off, limit kept for next session | Preserved | Preserved |
+
+Configuration persists in the `history.db` meta table and applies immediately with
+no restart. Over-shoot depends on the sampling period (~1 s push + command loop),
+about 0.05 Wh at 100 W.
+
+**Validation**: `wh` must be a finite number in `0 ~ 1000` (`MAX_LIMIT_WH`) and `mode`
+must be `once`/`always`. **Any invalid entry rejects the whole request (HTTP 400)**
+rather than silently normalising to "disabled" — the latter would be a dangerous
+silent degradation where the user believes a limit is set while it is actually off.
+`wh=0` disables the limit for that port. (The HA integration's number entity uses the
+same `0 ~ 1000` bound.)
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/ -v  # 240+ tests
+```
+
+## Known Limitations
+
+- **Single Device**: Current architecture supports only one charger at a time. Multi-device support is planned for future releases.
+- **Protocol Detection**: Protocol is derived from the authoritative firmware push (PIID 17/18, consistent with the Xiaomi Home app) and updates immediately on PD/PPS change — no periodic 60s refresh lag. A coarse voltage-based inference is used only in an extreme cold start (when PIID 17 is never received and its read fails).
+- **Platform Support**: Development and testing are done on Linux. macOS (Apple Silicon) is supported via dedicated darwin code paths and community-verified (#6); Windows has not been verified — use at your own risk.
+
+## Protocol Support
+
+| Protocol | Description |
+|----------|-------------|
+| 5V | USB 5V |
+| PD | USB Power Delivery |
+| PPS | PD Programmable Power Supply |
+| QC | Quick Charge |
+| AFC | Samsung Adaptive Fast Charging |
+| FCP | Huawei Fast Charge Protocol |
+| SCP | Huawei Super Charge Protocol |
+| UFCS | Universal Fast Charging Specification |
+| idle | No device connected |
+
+## License
+
+MIT License

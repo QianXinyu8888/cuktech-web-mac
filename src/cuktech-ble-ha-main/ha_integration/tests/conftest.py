@@ -1,0 +1,262 @@
+"""Shared fixtures for CUKTECH HA Integration tests."""
+import sys
+import types
+from pathlib import Path
+from unittest.mock import MagicMock, AsyncMock
+
+# 使测试模块可通过 `import conftest` 复用共享辅助类 (AsyncContextManager 等)
+sys.path.insert(0, str(Path(__file__).parent))
+
+
+class _FakeEntity:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+class _FakeSensorEntity(_FakeEntity):
+    pass
+
+
+class _FakeBinarySensorEntity(_FakeEntity):
+    pass
+
+
+class _FakeSwitchEntity(_FakeEntity):
+    pass
+
+
+class _FakeSelectEntity(_FakeEntity):
+    pass
+
+
+class _FakeNumberEntity(_FakeEntity):
+    pass
+
+
+class _FakeEventEntity(_FakeEntity):
+    async def async_will_remove_from_hass(self) -> None:
+        """模拟 EventEntity 的移除钩子 (真实 HA 中存在)。"""
+        return None
+
+
+ha_core = types.ModuleType("homeassistant.core")
+ha_core.callback = lambda func: func
+ha_core.HomeAssistant = MagicMock
+
+ha_helpers = types.ModuleType("homeassistant.helpers")
+ha_helpers.aiohttp_client = MagicMock()
+ha_helpers.entity_platform = MagicMock()
+ha_helpers.event = MagicMock()
+ha_helpers.entity = MagicMock()
+# 设备注册表：`__init__` 里的 `from homeassistant.helpers import device_registry as dr`
+# 走的是这个属性，缺了就是 ImportError（被宽 except 吞掉，测试里表现为"这段没跑"）。
+ha_helpers.device_registry = MagicMock()
+# 默认返回值对齐生产：集成刚 setup、设备还没被实体创建出来时，async_get_device()
+# 返回 None。不写这行的话它返回一个 Mock，于是"设备已存在"的分支会假绿。
+ha_helpers.device_registry.async_get.return_value.async_get_device.return_value = None
+ha_helpers.storage = types.ModuleType("homeassistant.helpers.storage")
+
+
+class _FakeStore:
+    """Minimal Store replacement: dict-backed, no hass loop and no disk.
+
+    Only the methods the integration actually calls need to exist. Keeping it
+    here means the suite still runs without a real HA install — same reasoning
+    as the rest of these stubs.
+    """
+
+    def __init__(self, hass, version, key, **kwargs):
+        self.version = version
+        self.key = key
+        self._data = None
+
+    async def async_load(self):
+        return self._data
+
+    async def async_save(self, data):
+        self._data = data
+
+
+ha_helpers.storage.Store = _FakeStore
+
+ha_components = types.ModuleType("homeassistant.components")
+ha_components.mqtt = types.ModuleType("homeassistant.components.mqtt")
+ha_components.mqtt.async_publish = AsyncMock()
+ha_components.mqtt.async_subscribe = AsyncMock()
+ha_components.mqtt.async_wait_for_mqtt_client = AsyncMock(return_value=True)
+ha_components.sensor = types.ModuleType("homeassistant.components.sensor")
+ha_components.sensor.SensorEntity = _FakeSensorEntity
+ha_components.sensor.SensorEntityDescription = MagicMock
+# 这些枚举/单位用真实字符串值而非 MagicMock：HA 对 (device_class, state_class)
+# 组合有硬校验（例如 device_class=energy 不允许 state_class=measurement），
+# 只有拿到真值才能在测试里钉住这类"合法组合"，否则断言只是在比 MagicMock。
+ha_components.sensor.SensorDeviceClass = types.SimpleNamespace(
+    ENERGY="energy", ENUM="enum", POWER="power", CONNECTIVITY="connectivity",
+)
+ha_components.sensor.SensorStateClass = types.SimpleNamespace(
+    MEASUREMENT="measurement", TOTAL="total", TOTAL_INCREASING="total_increasing",
+)
+ha_components.sensor.UnitOfPower = "W"
+ha_components.binary_sensor = types.ModuleType("homeassistant.components.binary_sensor")
+ha_components.binary_sensor.BinarySensorEntity = _FakeBinarySensorEntity
+ha_components.binary_sensor.BinarySensorDeviceClass = MagicMock()
+ha_components.switch = types.ModuleType("homeassistant.components.switch")
+ha_components.switch.SwitchEntity = _FakeSwitchEntity
+ha_components.switch.SwitchDeviceClass = MagicMock()
+ha_components.select = types.ModuleType("homeassistant.components.select")
+ha_components.select.SelectEntity = _FakeSelectEntity
+ha_components.number = types.ModuleType("homeassistant.components.number")
+ha_components.number.NumberEntity = _FakeNumberEntity
+ha_components.number.NumberMode = MagicMock()
+ha_components.event = types.ModuleType("homeassistant.components.event")
+ha_components.event.EventEntity = _FakeEventEntity
+ha_components.event.EventEntityDescription = MagicMock
+
+ha_exceptions = types.ModuleType("homeassistant.exceptions")
+ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
+
+ha_data_entry_flow = types.ModuleType("homeassistant.data_entry_flow")
+ha_data_entry_flow.FlowResult = dict
+ha_data_entry_flow.AbortFlow = type("AbortFlow", (Exception,), {})
+sys.modules['homeassistant.data_entry_flow'] = ha_data_entry_flow
+
+class _FakeConfigFlow:
+    VERSION = 1
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__()
+
+
+class _FakeOptionsFlow:
+    """OptionsFlow 占位：真实 HA 里由流程管理器注入 config_entry 属性。"""
+
+    def __init__(self, *args, **kwargs):
+        self.config_entry = kwargs.get("config_entry")
+
+
+ha_config = types.ModuleType("homeassistant.config_entries")
+ha_config.ConfigEntry = MagicMock()
+ha_config.ConfigFlow = _FakeConfigFlow
+ha_config.OptionsFlow = _FakeOptionsFlow
+
+# 选择器：多设备下拉框用 SelectSelector。测试只需要"能构造、能塞进 schema"，
+# 真实校验由 HA 侧完成，不在本套测试的断言范围内。
+ha_helpers_selector = types.ModuleType("homeassistant.helpers.selector")
+ha_helpers_selector.SelectSelector = lambda config=None, **kwargs: ("SelectSelector", config)
+ha_helpers_selector.SelectSelectorConfig = lambda **kwargs: kwargs
+ha_helpers_selector.SelectOptionDict = lambda **kwargs: dict(kwargs)
+ha_helpers_selector.SelectSelectorMode = types.SimpleNamespace(LIST="list", DROPDOWN="dropdown")
+
+ha_const = types.ModuleType("homeassistant.const")
+ha_const.Platform = MagicMock()
+ha_const.EntityCategory = MagicMock()
+ha_const.UnitOfElectricCurrent = types.SimpleNamespace(AMPERE="A")
+ha_const.UnitOfElectricPotential = types.SimpleNamespace(VOLT="V")
+ha_const.UnitOfPower = types.SimpleNamespace(WATT="W")
+ha_const.UnitOfEnergy = types.SimpleNamespace(
+    WATT_HOUR="Wh", KILO_WATT_HOUR="kWh",
+)
+ha_const.CONF_NAME = "name"
+
+_vol = types.ModuleType("voluptuous")
+
+
+class _VolMarker(str):
+    """schema 的键标记：仍然是 str（既有用例把它当 key 用），但能区分必填/选填。
+
+    真实 voluptuous 里 Required/Optional 是 Marker 对象；替身原先直接返回裸 key，
+    于是"这个字段是不是必填"在测试里无法断言——而 `name` 够不够"可选"正是
+    options flow 里"清空 = 交回自动同步"能不能走通的关键。
+    """
+
+    required = True
+
+    def __new__(cls, key, **kwargs):
+        obj = super().__new__(cls, key)
+        obj.default = kwargs.get("default")
+        return obj
+
+
+class _VolOptional(_VolMarker):
+    required = False
+
+
+_vol.Schema = lambda s: s
+_vol.Optional = _VolOptional
+_vol.Required = _VolMarker
+_vol.In = lambda values: values
+sys.modules['voluptuous'] = _vol
+
+ha = types.ModuleType("homeassistant")
+ha.HomeAssistant = MagicMock
+
+sys.modules['homeassistant'] = ha
+sys.modules['homeassistant.core'] = ha_core
+sys.modules['homeassistant.const'] = ha_const
+sys.modules['homeassistant.config_entries'] = ha_config
+sys.modules['homeassistant.exceptions'] = ha_exceptions
+sys.modules['homeassistant.helpers'] = ha_helpers
+sys.modules['homeassistant.helpers.aiohttp_client'] = ha_helpers.aiohttp_client
+sys.modules['homeassistant.helpers.entity_platform'] = ha_helpers.entity_platform
+sys.modules['homeassistant.helpers.event'] = ha_helpers.event
+sys.modules['homeassistant.helpers.entity'] = ha_helpers.entity
+sys.modules['homeassistant.helpers.storage'] = ha_helpers.storage
+sys.modules['homeassistant.helpers.selector'] = ha_helpers_selector
+ha_helpers.selector = ha_helpers_selector
+sys.modules['homeassistant.components'] = ha_components
+sys.modules['homeassistant.components.mqtt'] = ha_components.mqtt
+sys.modules['homeassistant.components.sensor'] = ha_components.sensor
+sys.modules['homeassistant.components.binary_sensor'] = ha_components.binary_sensor
+sys.modules['homeassistant.components.switch'] = ha_components.switch
+sys.modules['homeassistant.components.select'] = ha_components.select
+sys.modules['homeassistant.components.number'] = ha_components.number
+sys.modules['homeassistant.components.event'] = ha_components.event
+
+
+import pytest
+
+
+class AsyncContextManager:
+    """异步上下文管理器包装，模拟 aiohttp 的 `async with session.get(...) as resp`。"""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *args):
+        return False
+
+
+@pytest.fixture
+def mock_hass():
+    """Create a mock Home Assistant instance."""
+    hass = MagicMock()
+    hass.data = {}
+    hass.async_add_executor_job = MagicMock()
+    loop = MagicMock()
+    loop.time.return_value = 1000.0
+    hass.loop = loop
+
+    def _create_task(coro):
+        # 模拟 async_create_task：关闭未执行的协程，避免“coroutine never awaited”警告
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return MagicMock()
+
+    hass.async_create_task = MagicMock(side_effect=_create_task)
+    return hass
+
+
+@pytest.fixture
+def mock_entry():
+    """Create a mock config entry."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry_123"
+    entry.data = {
+        "name": "CUKTECH Charger",
+        "server_url": "http://localhost:8199",
+    }
+    return entry

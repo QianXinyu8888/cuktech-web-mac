@@ -1,0 +1,35 @@
+name: Software regression and publication guard
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - run: python -m pip install -e 'src/cuktech-ble-ha-main/ble_server[dev]'
+      - run: python -m pytest tests src/cuktech-ble-ha-main/ble_server/tests -q
+      - run: python -m pytest src/cuktech-ble-ha-main/ha_integration/tests -q
+      - name: Frontend checks
+        run: |
+          for file in src/cuktech-ble-ha-main/ble_server/tests/js/*_test.js; do
+            node "$file" || exit 1
+          done
+      - run: python scripts/check_publication.py
+      - name: Dependency vulnerability audit
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit
+      - name: Shell syntax
+        run: |
+          find macos -name '*.sh' -exec bash -n {} \;
+          for file in *.command; do bash -n "$file" || exit 1; done
+      - run: bash macos/build_app.sh

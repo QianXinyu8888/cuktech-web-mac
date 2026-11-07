@@ -1,0 +1,105 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.jar
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# SQLite database
+*.db
+*.db-shm
+*.db-wal
+
+# BLE Server specific
+cuktech-ble-server/.venv/
+cuktech-ble-server/__pycache__/
+cuktech-ble-server/src/cuktech_ble/__pycache__/
+ble_server/data/
+ble_server/tools/
+ble_server/spec_cli.py
+docs/frida
+docs/hci_log
+docs/dex
+docs/smali_out
+docs/plugin_analysis
+docs/apk
+docs/smali_out2
+docs/smali_out3
+docs/loadtest
+docs/tmp
+docs/tools
+docs/bug.md
+docs/async.md
+docs/research
+docs/plans
+
+
+# Environment variables
+.env
+*.env
+!.env.example
+
+# Config files with secrets
+config.yaml
+!config.yaml.example
+
+# HA specific
+ha_config/.storage/
+ha_config/.cache/
+ha_config/.storage/core.entity_registry
+ha_config/.storage/core.device_registry
+ha_config/.storage/core.config_entries
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Local scripts
+bump-version.sh
+sync.sh
+*.lock
+.log_level
+baksmali.jar
+.qa
+
+esp32_ble/.github/
+esp32_ble/sdkconfig
+esp32_ble/sdkconfig.old
+esp32_ble/rust
+esp32_ble/main/embedded_files.h

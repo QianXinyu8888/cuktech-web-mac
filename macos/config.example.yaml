@@ -1,0 +1,23 @@
+# 酷态站 全新配置。用米家 App 扫码导入设备。
+ble:
+  name: "充电器"
+  mac: ""
+  token: ""
+  ble_key: ""
+  scan_timeout: 15
+mqtt:
+  enabled: false
+  host: localhost
+  port: 1883
+  username: ""
+  password: ""
+  topic_prefix: cuktech/charger
+bemfa:
+  enabled: false
+  uid: ""
+server:
+  host: 127.0.0.1
+  port: 18299
+  log_level: info
+  history_retention_days: 30
+  settings_refresh_interval: 10.0

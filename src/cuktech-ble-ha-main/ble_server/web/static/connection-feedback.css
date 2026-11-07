@@ -1,0 +1,6 @@
+.connection-feedback { margin-top: 12px; padding: 12px 14px; border: 1px solid currentColor; border-radius: 12px; color: var(--text); background: var(--bg-card, transparent); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
+.connection-feedback[hidden], #connectionStop[hidden] { display: none; }
+.connection-stop { margin-top: 10px; min-height: 36px; }
+@media (max-width: 600px) { .connection-feedback { font-size: 12px; padding: 10px 12px; } }
+
+.topbar .connection-feedback { margin: 0 0 12px; }
