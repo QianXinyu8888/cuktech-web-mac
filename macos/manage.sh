@@ -33,7 +33,7 @@ install_environment() {
     if command -v uv >/dev/null 2>&1; then
         uv pip install --python "$PY" -e "$SERVICE"
     else
-        "$PY" -m pip install --upgrade pip
+        "$PY" -m pip install --upgrade pip 'setuptools>=84.1.0' wheel
         "$PY" -m pip install -e "$SERVICE"
     fi
     "$PY" "$BASE/macos/launcher.py" prepare
