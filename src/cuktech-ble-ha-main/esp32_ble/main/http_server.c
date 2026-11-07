@@ -1,5 +1,7 @@
 #include "http_server.h"
 #include "config.h"
+#include "cloud_protocol.h"
+#include "http_guard.h"
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -34,75 +36,34 @@ void http_server_set_callbacks(port_data_cb ports, settings_cb settings,
     _ble_ctl_cb = ble_ctl;
 }
 
+static bool _api_guard(httpd_req_t *req, bool post) {
+    char host[64]={0},origin[96]={0},site[32]={0},type[96]={0},ip1[16]={0},ip2[16]={0};
+    if(httpd_req_get_hdr_value_str(req,"Host",host,sizeof host)!=ESP_OK)return false;
+    const char *headers[]={"Origin","Sec-Fetch-Site","Content-Type"};
+    char *buffers[]={origin,site,type}; size_t sizes[]={sizeof origin,sizeof site,sizeof type};
+    for(int i=0;i<3;i++) {
+        size_t len=httpd_req_get_hdr_value_len(req,headers[i]);
+        if(len>=sizes[i])return false;
+        if(len && httpd_req_get_hdr_value_str(req,headers[i],buffers[i],sizes[i])!=ESP_OK)return false;
+    }
+    esp_netif_t *sta=esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), *ap=esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    esp_netif_ip_info_t info;
+    if(sta && esp_netif_get_ip_info(sta,&info)==ESP_OK)snprintf(ip1,sizeof ip1,IPSTR,IP2STR(&info.ip));
+    if(ap && esp_netif_get_ip_info(ap,&info)==ESP_OK)snprintf(ip2,sizeof ip2,IPSTR,IP2STR(&info.ip));
+    return http_guard_request(host,origin,site,type,post,ip1,ip2);
+}
+#define GUARD_API(req, post) do { if (!_api_guard(req,post)) { httpd_resp_send_err(req,HTTPD_403_FORBIDDEN,"forbidden"); return 0; } } while(0)
+
 /* ==================== Ping / Health Check ==================== */
 
 
-/* cJSON memory pool with automatic heap fallback.
- *
-   Each API handler resets pool_pos to 0 on entry.  cJSON objects are
-   allocated from the pool instead of the heap.  cJSON_Delete becomes a
-   no-op for pool allocations — the entire pool is reused when the next
-   request starts.
- *
-   When the pool is exhausted (deeply nested responses), allocations
-   fall back to the heap.  _cjson_free distinguishes pool vs heap
-   pointers and actually frees heap allocations.
- *
-   This eliminates thousands of tiny malloc/free calls (the single biggest
-   source of heap fragmentation in the firmware) while still being safe
-   under edge-case memory pressure. */
-
-static char _cjson_pool[4096];
-static size_t _cjson_pool_pos = 0;
-static size_t _cjson_pool_peak = 0;   // high-water mark for diagnostics
-static bool _cjson_pool_overflow = false;  // true if any heap fallback occurred
-
-#define CJSON_RESET() do { _cjson_pool_pos = 0; } while(0)
-
-static void *_cjson_alloc(size_t sz) {
-    size_t aligned = (sz + 3) & ~3;
-    if (_cjson_pool_pos + aligned <= sizeof(_cjson_pool)) {
-        void *p = _cjson_pool + _cjson_pool_pos;
-        _cjson_pool_pos += aligned;
-        if (_cjson_pool_pos > _cjson_pool_peak) _cjson_pool_peak = _cjson_pool_pos;
-        return p;
-    }
-    /* Pool exhausted — fall back to heap.  Caller will still work
-       correctly (no NULL returns) at the cost of some fragmentation. */
-    if (!_cjson_pool_overflow) {
-        _cjson_pool_overflow = true;
-        ESP_LOGW(TAG, "cJSON pool exhausted (%u/%u), falling back to heap",
-                 (unsigned)_cjson_pool_pos, (unsigned)sizeof(_cjson_pool));
-    }
-    return malloc(sz);
-}
-
-static void _cjson_free(void *ptr) {
-    if (!ptr) return;
-    /* If the pointer is within the pool range, it's a pooled allocation —
-       no-op, freed when the next request resets pool_pos. */
-    if ((char*)ptr >= _cjson_pool && (char*)ptr < _cjson_pool + sizeof(_cjson_pool))
-        return;
-    free(ptr);
-}
-
-/* GC: reset pool and report diagnostics.  Called from app_task on
-   heap pressure.  Returns peak pool usage for the caller's log. */
-size_t http_server_pool_gc(void) {
-    size_t peak = _cjson_pool_peak;
-    if (_cjson_pool_overflow)
-        ESP_LOGI(TAG, "Pool GC: peak=%u/%u overflow=Y", (unsigned)peak, (unsigned)sizeof(_cjson_pool));
-    else
-        ESP_LOGD(TAG, "Pool GC: peak=%u/%u", (unsigned)peak, (unsigned)sizeof(_cjson_pool));
-    _cjson_pool_pos = 0;
-    _cjson_pool_peak = 0;
-    _cjson_pool_overflow = false;
-    return peak;
-}
+/* cJSON uses its thread-safe standard heap allocator in all tasks.
+ * Retain the diagnostics API for existing callers; no shared arena to reset. */
+size_t http_server_pool_gc(void) { return 0; }
 
 static int _get_ping_handler(httpd_req_t *req) {
+    GUARD_API(req, false);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, "{\"ok\":true,\"service\":\"cuktech_charger_esp32\"}");
     return 0;
 }
@@ -114,6 +75,7 @@ static char _json_buf[2048];
 /* ==================== Status API (for HA integration validation) ==================== */
 
 static int _get_status_handler(httpd_req_t *req) {
+    GUARD_API(req, false);
     bool ready = ble_manager_is_ready();
     char buf[384];
     int n = snprintf(buf, sizeof(buf),
@@ -128,85 +90,35 @@ static int _get_status_handler(httpd_req_t *req) {
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
         DEVICE_MODEL, FW_VERSION);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(req, buf, n);
     return 0;
 }
 
 /* ==================== Config API (with data masking) ==================== */
 
-/* Mask sensitive value: show first 4 + **** + last 4.
-   e.g. "abcdefghijklm" → "abcd****jklm"
-   If length <= 8 or output too small, writes "****". */
-static void _mask_str(const char *in, char *out, size_t out_size) {
-    size_t len = strlen(in);
-    if (len <= 8 || out_size < 10) {
-        strncpy(out, "****", out_size - 1);
-        out[out_size - 1] = '\0';
-        return;
-    }
-    size_t copy_front = 4;
-    size_t copy_back  = 4;
-    /* Ensure total = front + "****" + back < out_size */
-    if (copy_front + 4 + copy_back >= out_size) {
-        copy_front = (out_size - 5) / 2;  /* minimal fallback */
-        copy_back  = copy_front;
-    }
-    memcpy(out, in, copy_front);
-    memcpy(out + copy_front, "****", 4);
-    memcpy(out + copy_front + 4, in + len - copy_back, copy_back);
-    out[copy_front + 4 + copy_back] = '\0';
-}
-
 static int _get_config_handler(httpd_req_t *req) {
-    /* Mask sensitive values first */
-    char mask_ws[16], mask_tk[16], mask_bk[16], mask_mp[16], mask_uid[16];
-    _mask_str(_cfg->wifi_pass, mask_ws, sizeof(mask_ws));
-    _mask_str(_cfg->device_token, mask_tk, sizeof(mask_tk));
-    _mask_str(_cfg->device_ble_key, mask_bk, sizeof(mask_bk));
-    _mask_str(_cfg->mqtt_pass, mask_mp, sizeof(mask_mp));
-    _mask_str(_cfg->bemfa_uid, mask_uid, sizeof(mask_uid));
-
-    int n = snprintf(_json_buf, sizeof(_json_buf),
-        "{"
-        "\"wifi_ssid\":\"%s\","
-        "\"wifi_pass\":\"%s\","
-        "\"device_mac\":\"%s\","
-        "\"device_token\":\"%s\","
-        "\"device_ble_key\":\"%s\","
-        "\"mqtt_broker\":\"%s\","
-        "\"mqtt_port\":%u,"
-        "\"mqtt_user\":\"%s\","
-        "\"mqtt_pass\":\"%s\","
-        "\"mqtt_topic_prefix\":\"%s\","
-        "\"mqtt_enable\":%s,"
-        "\"bemfa_enable\":%s,"
-        "\"bemfa_uid\":\"%s\","
-        "\"bemfa_name_c1\":\"%s\","
-        "\"bemfa_name_c2\":\"%s\","
-        "\"bemfa_name_c3\":\"%s\","
-        "\"bemfa_name_a\":\"%s\","
-        "\"bemfa_name_ble\":\"%s\","
-        "\"reboot_interval_sec\":%u"
-        "}",
-        _cfg->wifi_ssid, mask_ws,
-        _cfg->device_mac, mask_tk, mask_bk,
-        _cfg->mqtt_broker, (unsigned)_cfg->mqtt_port,
-        _cfg->mqtt_user, mask_mp,
-        _cfg->mqtt_topic_prefix,
-        _cfg->mqtt_enable ? "true" : "false",
-        _cfg->bemfa_enable ? "true" : "false",
-        mask_uid,
-        _cfg->bemfa_name_c1, _cfg->bemfa_name_c2, _cfg->bemfa_name_c3,
-        _cfg->bemfa_name_a, _cfg->bemfa_name_ble,
-        (unsigned)_cfg->reboot_interval_sec);
-
+    GUARD_API(req, false);
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return ESP_ERR_NO_MEM;
+#define CONFIG_STR(field) cJSON_AddStringToObject(root, #field, _cfg->field)
+#define CONFIG_SECRET(field) cJSON_AddStringToObject(root, #field, _cfg->field[0] ? "****" : "")
+    CONFIG_STR(wifi_ssid); CONFIG_SECRET(wifi_pass);
+    CONFIG_STR(device_mac); CONFIG_SECRET(device_token); CONFIG_SECRET(device_ble_key);
+    CONFIG_STR(mqtt_broker); CONFIG_STR(mqtt_user); CONFIG_SECRET(mqtt_pass); CONFIG_STR(mqtt_topic_prefix);
+    cJSON_AddNumberToObject(root, "mqtt_port", _cfg->mqtt_port);
+    cJSON_AddBoolToObject(root, "mqtt_enable", _cfg->mqtt_enable);
+    CONFIG_STR(cloud_url); CONFIG_SECRET(cloud_token);
+    cJSON_AddBoolToObject(root, "cloud_enabled", _cfg->cloud_enabled);
+    cJSON_AddBoolToObject(root, "bemfa_enable", _cfg->bemfa_enable);
+    CONFIG_SECRET(bemfa_uid); CONFIG_STR(bemfa_name_c1); CONFIG_STR(bemfa_name_c2);
+    CONFIG_STR(bemfa_name_c3); CONFIG_STR(bemfa_name_a); CONFIG_STR(bemfa_name_ble);
+    cJSON_AddNumberToObject(root, "reboot_interval_sec", _cfg->reboot_interval_sec);
+#undef CONFIG_STR
+#undef CONFIG_SECRET
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    if (n > 0 && (size_t)n < sizeof(_json_buf))
-        httpd_resp_send(req, _json_buf, n);
-    else
-        httpd_resp_sendstr(req, "{\"error\":\"buffer_full\"}");
+    if (cJSON_PrintPreallocated(root, _json_buf, sizeof(_json_buf), false)) httpd_resp_sendstr(req, _json_buf);
+    else httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "buffer_full");
+    cJSON_Delete(root);
     return 0;
 }
 
@@ -219,14 +131,37 @@ static void _json_error(httpd_req_t *req, const char *msg) {
 }
 
 static int _post_config_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, true);
 
-    char buf[1024];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    char buf[3072];
+    if (req->content_len <= 0 || req->content_len >= sizeof(buf)) { _json_error(req, "body_too_large"); return 0; }
+    int len = 0;
+    while (len < req->content_len) {
+        int got = httpd_req_recv(req, buf + len, req->content_len - len);
+        if (got <= 0) { _json_error(req, "incomplete_body"); return 0; }
+        len += got;
+    }
     if (len <= 0) { _json_error(req, "empty"); return 0; }
     buf[len] = '\0';
     cJSON *root = cJSON_Parse(buf);
     if (!root) { _json_error(req, "bad_json"); return 0; }
+
+    cJSON *cu = cJSON_GetObjectItemCaseSensitive(root, "cloud_url");
+    cJSON *ct = cJSON_GetObjectItemCaseSensitive(root, "cloud_token");
+    cJSON *ce = cJSON_GetObjectItemCaseSensitive(root, "cloud_enabled");
+    const char *url = cu && cJSON_IsString(cu) ? cu->valuestring : _cfg->cloud_url;
+    char token[sizeof(_cfg->cloud_token)];
+    memcpy(token, _cfg->cloud_token, sizeof(token));
+    if ((cu && !http_guard_cloud_change(_cfg->cloud_url,url,_cfg->cloud_token,ct && cJSON_IsString(ct)?ct->valuestring:NULL)) ||
+        (cu && (!cJSON_IsString(cu) || strlen(url) >= sizeof(_cfg->cloud_url) || (*url && !cloud_url_valid(url)))) ||
+        (ct && (!cJSON_IsString(ct) || !cloud_update_token(token, sizeof(token), ct->valuestring))) ||
+        (ce && !cJSON_IsBool(ce)) ||
+        ((ce ? cJSON_IsTrue(ce) : _cfg->cloud_enabled) && (!cloud_url_valid(url) || !cloud_token_valid(token)))) {
+        cJSON_Delete(root); _json_error(req, "invalid_cloud_config"); return 0;
+    }
+    if (cu) strcpy(_cfg->cloud_url, url);
+    memcpy(_cfg->cloud_token, token, sizeof(token));
+    if (ce) _cfg->cloud_enabled = cJSON_IsTrue(ce);
 
     /* Sensitive fields: if the submitted value contains "****", skip
        overwriting (keep the original stored value). This matches the
@@ -311,12 +246,11 @@ static int _post_config_handler(httpd_req_t *req) {
 /* ==================== Dashboard API ==================== */
 
 static int _get_ports_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, false);
 
     if (!_port_data_cb) { _json_error(req, "error"); return 0; }
     cJSON *root = _port_data_cb();
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     if (cJSON_PrintPreallocated(root, _json_buf, sizeof(_json_buf), false))
         httpd_resp_sendstr(req, _json_buf);
     else
@@ -326,12 +260,11 @@ static int _get_ports_handler(httpd_req_t *req) {
 }
 
 static int _get_settings_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, false);
 
     if (!_settings_cb) { _json_error(req, "error"); return 0; }
     cJSON *root = _settings_cb();
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     if (cJSON_PrintPreallocated(root, _json_buf, sizeof(_json_buf), false))
         httpd_resp_sendstr(req, _json_buf);
     else
@@ -343,7 +276,7 @@ static int _get_settings_handler(httpd_req_t *req) {
 /* Combined endpoint: returns status + ports + settings in one request.
    Replaces 3 separate fetches in the frontend, reducing TCP buffer pressure. */
 static int _get_all_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, false);
 
     bool ready = ble_manager_is_ready();
     cJSON *root = cJSON_CreateObject();
@@ -368,7 +301,6 @@ static int _get_all_handler(httpd_req_t *req) {
     }
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     if (cJSON_PrintPreallocated(root, _json_buf, sizeof(_json_buf), false))
         httpd_resp_sendstr(req, _json_buf);
     else
@@ -378,7 +310,7 @@ static int _get_all_handler(httpd_req_t *req) {
 }
 
 static int _post_port_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, true);
 
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -407,7 +339,7 @@ static int _post_port_handler(httpd_req_t *req) {
 }
 
 static int _post_setting_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, true);
 
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -438,7 +370,7 @@ static int _post_setting_handler(httpd_req_t *req) {
 /* ==================== BLE Control API ==================== */
 
 static int _post_ble_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, true);
 
     char buf[128];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -466,7 +398,7 @@ static int _post_ble_handler(httpd_req_t *req) {
 /* ==================== Protocol Toggle API ==================== */
 
 static int _post_protocol_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, true);
 
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -502,7 +434,7 @@ static const char *SCR_LABELS[] = {"", "5分钟", "10分钟", "30分钟", "常�
 #define SCR_VALID(v) ((v) >= 1 && (v) < SCR_COUNT)
 
 static int _get_sleep_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, false);
 
     if (!_settings_cb) { _json_error(req, "error"); return 0; }
     cJSON *root = _settings_cb();
@@ -523,7 +455,7 @@ static int _get_sleep_handler(httpd_req_t *req) {
 }
 
 static int _post_sleep_handler(httpd_req_t *req) {
-    _cjson_pool_pos = 0;
+    GUARD_API(req, true);
 
     char buf[128];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -572,7 +504,6 @@ static void _serve_embedded(httpd_req_t *req, const EmbeddedFile *f) {
         httpd_resp_set_hdr(req, "Content-Encoding", f->encoding);
     }
     httpd_resp_set_hdr(req, "Cache-Control", "max-age=604800");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     const uint8_t *p = f->data;
     size_t left = f->size;
     const size_t CHUNK = 4096;
@@ -656,13 +587,6 @@ static int _get_static_handler(httpd_req_t *req) {
 void http_server_start(DeviceConfig *cfg, http_config_cb on_save) {
     _cfg = cfg;
     _on_save = on_save;
-    /* Initialize cJSON memory pool to reduce heap fragmentation */
-    {
-        cJSON_Hooks hooks = { .malloc_fn = _cjson_alloc, .free_fn = _cjson_free };
-        cJSON_InitHooks(&hooks);
-    }
-
-
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 80;
     config.max_open_sockets = 8;

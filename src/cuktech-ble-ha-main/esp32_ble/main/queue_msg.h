@@ -13,6 +13,7 @@ enum CmdType {
     CMD_POLL_STEP,
     CMD_DISCONNECT,
     CMD_RECONNECT,
+    CMD_CLOUD_BLE,
 };
 
 typedef struct {
@@ -20,6 +21,8 @@ typedef struct {
     uint8_t piid;
     uint32_t value;
     uint32_t poll_seq;
+    char cloud_id[37];
+    uint64_t cloud_expires_at;
 } BleCommand;
 
 enum ResultType {
@@ -43,6 +46,7 @@ typedef struct {
     uint8_t protocol;
     uint8_t status;
     bool ble_ready;
+    char cloud_id[37];
 } BleResult;
 
 extern QueueHandle_t cmd_queue;

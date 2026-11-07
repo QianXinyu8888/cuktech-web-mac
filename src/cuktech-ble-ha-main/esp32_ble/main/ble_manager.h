@@ -40,8 +40,8 @@ bool ble_manager_send_set_nr_async(uint8_t piid, uint32_t value);
 bool ble_manager_miot_get(uint8_t piid, uint32_t* value);
 bool ble_manager_miot_set(uint8_t piid, uint32_t value);
 void ble_manager_keepalive(void);
-void ble_manager_disconnect(void);
-void ble_manager_set_enabled(bool enabled);
+bool ble_manager_disconnect(void);
+bool ble_manager_set_enabled(bool enabled);
 bool ble_manager_is_enabled(void);
 
 const PortInfo* ble_manager_get_ports(void);
@@ -49,3 +49,7 @@ uint32_t ble_manager_get_setting(uint8_t piid);
 bool ble_manager_has_setting(uint8_t piid);
 void ble_manager_store_setting(uint8_t piid, uint32_t val);
 int ble_manager_pending_count(void);
+
+// Remote SET: only an actual matching response/timeout produces cloud_id result.
+bool ble_manager_send_cloud_set(uint8_t piid, uint32_t value, const char *cloud_id);
+bool ble_manager_has_cloud_pending(void);

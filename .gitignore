@@ -48,3 +48,8 @@ dist/
 exports/
 backups/
 *.zip
+
+# Cloud development/build output
+node_modules/
+.wrangler/
+managed_components/

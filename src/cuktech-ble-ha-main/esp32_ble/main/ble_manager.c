@@ -3,6 +3,7 @@
 #include "miot_protocol.h"
 #include "miot_auth.h"
 #include "queue_msg.h"
+#include "cloud_protocol.h"
 #include "miot_protocol_shared.h"
 
 #include <string.h>
@@ -56,8 +57,8 @@ static StateCallback _state_cb = NULL;
 static PortDataCallback _port_data_cb = NULL;
 static uint16_t _conn_handle = 0xFFFF;
 static bool _connected = false;
-static uint16_t _auth_ctrl_handle = 0, _auth_data_handle = 0, _cmd_send_handle = 0, _cmd_recv_handle = 0;
-static QueueHandle_t _q_auth_ctrl = NULL, _q_auth_data = NULL, _q_cmd_send = NULL, _q_cmd_recv = NULL;
+static uint16_t _auth_ctrl_handle = 0, _auth_data_handle = 0, _cmd_send_handle = 0, _cmd_recv_handle = 0, _device_info_handle = 0;
+static QueueHandle_t _q_auth_ctrl = NULL, _q_auth_data = NULL, _q_cmd_send = NULL, _q_cmd_recv = NULL, _q_device_info = NULL;
 static SessionKeys _keys = {};
 static uint32_t _send_it = 0;
 static uint8_t _seq = 1;
@@ -80,7 +81,7 @@ static volatile bool _nimble_ready = false;  /* written by NimBLE host task, rea
 static volatile bool _enabled = true;
 
 typedef struct { uint16_t uuid; uint16_t *handle; const char *name; } CharCtx;
-static CharCtx _char_ctx[4];
+static CharCtx _char_ctx[5];
 static int _char_ctx_n = 0;
 
 /* ============================================================
@@ -100,6 +101,7 @@ typedef struct {
     uint32_t  send_value;
     uint32_t  poll_seq;
     uint64_t  deadline;
+    char      cloud_id[37];
     bool      acked;
     bool      no_result;
     SendPhase phase;
@@ -118,11 +120,12 @@ static void _pending_check_timeouts(void) {
                  _pending[i].seq, _pending[i].piid);
         BleResult r;
         if (_pending[i].type == PENDING_GET) {
-            r = (BleResult){RES_GET, false, _pending[i].piid, 0, _pending[i].poll_seq};
+            r = (BleResult){.type=RES_GET, .success=false, .piid=_pending[i].piid, .value=0, .poll_seq=_pending[i].poll_seq};
         } else {
-            r = (BleResult){RES_SET, false, _pending[i].piid, _pending[i].send_value, 0};
+            r = (BleResult){.type=RES_SET, .success=false, .piid=_pending[i].piid, .value=_pending[i].send_value, .poll_seq=0};
         }
-        xQueueSend(result_queue, &r, pdMS_TO_TICKS(50));
+        memcpy(r.cloud_id, _pending[i].cloud_id, sizeof(r.cloud_id));
+        xQueueSend(result_queue, &r, r.cloud_id[0] ? portMAX_DELAY : pdMS_TO_TICKS(50));
         _pending[i].in_use = false;
     }
 }
@@ -140,7 +143,7 @@ static void _pending_match(const uint8_t *resp, size_t rl) {
                 val = resp[13] | (resp[14] << 8) | (resp[15] << 16) | (resp[16] << 24);
             else if (vlen >= 1 && rl >= 14)
                 val = resp[13];
-            BleResult r = {RES_GET, true, _pending[i].piid, val, _pending[i].poll_seq};
+            BleResult r = {.type=RES_GET, .success=true, .piid=_pending[i].piid, .value=val, .poll_seq=_pending[i].poll_seq};
             xQueueSend(result_queue, &r, pdMS_TO_TICKS(50));
             _pending[i].in_use = false;
             return;
@@ -150,10 +153,11 @@ static void _pending_match(const uint8_t *resp, size_t rl) {
             return;
         }
         if (_pending[i].type == PENDING_SET && op == 0x04) {
+            if (!cloud_set_response_matches(_pending[i].seq,_pending[i].piid,resp,rl)) continue;
             if (!_pending[i].no_result) {
-                bool piid_ok = (rl >= 8 && resp[7] == _pending[i].piid);
-                BleResult r = {RES_SET, piid_ok, _pending[i].piid, _pending[i].send_value, 0};
-                xQueueSend(result_queue, &r, pdMS_TO_TICKS(50));
+                BleResult r = {.type=RES_SET, .success=true, .piid=_pending[i].piid, .value=_pending[i].send_value, .poll_seq=0};
+                memcpy(r.cloud_id, _pending[i].cloud_id, sizeof(r.cloud_id));
+                xQueueSend(result_queue, &r, r.cloud_id[0] ? portMAX_DELAY : pdMS_TO_TICKS(50));
             }
             _pending[i].in_use = false;
             return;
@@ -218,6 +222,7 @@ static void _dispatch_notif(uint16_t attr_handle, const uint8_t *data, size_t le
     else if (attr_handle == _auth_data_handle) q = _q_auth_data;
     else if (attr_handle == _cmd_send_handle)  q = _q_cmd_send;
     else if (attr_handle == _cmd_recv_handle)  q = _q_cmd_recv;
+    else if (attr_handle == _device_info_handle) q = _q_device_info;
 
     if (q) {
         if (xQueueSend(q, &item, 0) != pdTRUE) {
@@ -248,8 +253,8 @@ static bool _pop_cmd_send(uint8_t *buf, size_t *len) {
 
 static void _drain_all_queues(void) {
     NotifItem item;
-    QueueHandle_t qs[] = {_q_auth_ctrl, _q_auth_data, _q_cmd_send, _q_cmd_recv};
-    for (int i = 0; i < 4; i++) while (xQueueReceive(qs[i], &item, 0) == pdTRUE) {}
+    QueueHandle_t qs[] = {_q_auth_ctrl, _q_auth_data, _q_cmd_send, _q_cmd_recv, _q_device_info};
+    for (size_t i = 0; i < sizeof(qs) / sizeof(qs[0]); i++) if (qs[i]) while (xQueueReceive(qs[i], &item, 0) == pdTRUE) {}
 }
 
 /* ============================================================
@@ -346,9 +351,7 @@ static void _parse_port(uint8_t piid, const uint8_t *pt, size_t pt_len) {
              piid, _ports[idx].voltage, _ports[idx].current,
              _ports[idx].power, _ports[idx].protocol, _ports[idx].status);
     if (result_queue) {
-        BleResult r = {RES_PORT_PUSH, true, piid, 0, 0,
-                       _ports[idx].voltage, _ports[idx].current, _ports[idx].power,
-                       _ports[idx].protocol, _ports[idx].status, false};
+        BleResult r = {.type=RES_PORT_PUSH, .success=true, .piid=piid, .value=0, .poll_seq=0, .voltage=_ports[idx].voltage, .current=_ports[idx].current, .power=_ports[idx].power, .protocol=_ports[idx].protocol, .status=_ports[idx].status, .ble_ready=false};
         if (xQueueSend(result_queue, &r, 0) != pdTRUE)
             ESP_LOGW(TAG, "result_queue full, dropping push");
     }
@@ -461,6 +464,12 @@ static void _auth(void) {
     _auth_sync_send_data(placeholder, 4 + pad_len);
     vTaskDelay(pdMS_TO_TICKS(600)); _drain_auth_queue();
 
+    /* Match the Mac client: auth control notifications are enabled only
+       after the initial exchange, immediately before CMD_LOGIN. */
+    if (!_wru(_auth_ctrl_handle + 1, (uint8_t[]){0x01, 0x00}, 2)) {
+        ESP_LOGE(TAG, "Could not subscribe to auth control");
+        goto fail;
+    }
     ESP_LOGI(TAG, "Phase B: key exchange");
     vTaskDelay(pdMS_TO_TICKS(50));
     _auth_sync_send_ctrl((uint8_t[]){0x24, 0, 0, 0}, 4);
@@ -813,16 +822,25 @@ static void _discover(void) {
     _char_ctx[1] = (CharCtx){CHAR_UUID_AUTH_DATA, &_auth_data_handle, "auth_data"};
     _char_ctx[2] = (CharCtx){CHAR_UUID_CMD_SEND,  &_cmd_send_handle,  "cmd_send"};
     _char_ctx[3] = (CharCtx){CHAR_UUID_CMD_RECV,  &_cmd_recv_handle,  "cmd_recv"};
-    _char_ctx_n = 4;
+    _char_ctx[4] = (CharCtx){0x001c, &_device_info_handle, "device_info"};
+    _char_ctx_n = 5;
     xSemaphoreTake(_disc_sem, 0);
     ble_gattc_disc_all_chrs(_conn_handle, _disc_service_start, _disc_service_end, _disc_chr_cb, NULL);
     if (xSemaphoreTake(_disc_sem, pdMS_TO_TICKS(5000)) != pdTRUE) ESP_LOGW(TAG, "Char disc timeout");
     ESP_LOGI(TAG, "handles: ctrl=0x%04X data=0x%04X send=0x%04X recv=0x%04X",
              _auth_ctrl_handle, _auth_data_handle, _cmd_send_handle, _cmd_recv_handle);
-    if (_auth_ctrl_handle) { uint8_t v[] = {0x01,0x00}; _wru(_auth_ctrl_handle+1, v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
-    if (_auth_data_handle) { uint8_t v[] = {0x01,0x00}; _wru(_auth_data_handle+1, v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
-    if (_cmd_send_handle)  { uint8_t v[] = {0x01,0x00}; _wru(_cmd_send_handle+1,  v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
     if (_cmd_recv_handle)  { uint8_t v[] = {0x01,0x00}; _wru(_cmd_recv_handle+1,  v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
+    if (_cmd_send_handle)  { uint8_t v[] = {0x01,0x00}; _wru(_cmd_send_handle+1,  v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
+    if (_device_info_handle) { uint8_t v[] = {0x01,0x00}; _wru(_device_info_handle+1, v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
+    if (_auth_data_handle) { uint8_t v[] = {0x01,0x00}; _wru(_auth_data_handle+1, v, 2); vTaskDelay(pdMS_TO_TICKS(100)); }
+    if (_device_info_handle && _q_device_info) {
+        uint8_t response[256]; size_t response_len;
+        _wru_nr(_device_info_handle, (uint8_t[]){0x00}, 1);
+        _wait_queue(_q_device_info, response, &response_len, 3000);
+        _wru_nr(_device_info_handle, (uint8_t[]){0x03}, 1);
+        _wait_queue(_q_device_info, response, &response_len, 3000);
+        _wru(_device_info_handle+1, (uint8_t[]){0x00,0x00}, 2);
+    }
     vTaskDelay(pdMS_TO_TICKS(500));
     if (_auth_ctrl_handle && _auth_data_handle) { _set_state(BLE_AUTHENTICATING); _auth(); }
     else { ESP_LOGE(TAG, "Missing auth handles"); _set_state(BLE_RECONNECT); }
@@ -847,18 +865,21 @@ static void _keepalive(void) {
     _last_keepalive = esp_timer_get_time() / 1000;
 }
 
-void ble_manager_disconnect(void) {
+bool ble_manager_disconnect(void) {
     /* Non-reentrant guard: prevent overlapping disconnect sequences */
     static bool _disconnecting = false;
-    if (_disconnecting) { _drain_all_queues(); return; }
-    if (!_connected) { _drain_all_queues(); return; }
+    if (_disconnecting) return false;
+    if (!_connected) { _drain_all_queues(); return true; }
     _disconnecting = true;
     _disable_all_notifications();
     xSemaphoreTake(_disconnect_sem, 0);
     ble_gap_terminate(_conn_handle, 0x13);
-    if (xSemaphoreTake(_disconnect_sem, pdMS_TO_TICKS(3000)) != pdTRUE) ESP_LOGW(TAG, "Disconnect timeout");
-    _connected = false; _conn_handle = 0xFFFF; _drain_all_queues();
+    bool confirmed = xSemaphoreTake(_disconnect_sem, pdMS_TO_TICKS(3000)) == pdTRUE;
+    if (!confirmed) ESP_LOGW(TAG, "Disconnect timeout");
+    if (confirmed) { _connected = false; _conn_handle = 0xFFFF; }
+    _drain_all_queues();
     _disconnecting = false;
+    return confirmed;
 }
 
 /* ============================================================
@@ -959,6 +980,7 @@ void ble_manager_init(const char *device_mac, const char *device_token, const ch
     _q_auth_data = xQueueCreate(NOTIF_QUEUE_LEN_AUTH, sizeof(NotifItem));
     _q_cmd_send  = xQueueCreate(NOTIF_QUEUE_LEN, sizeof(NotifItem));
     _q_cmd_recv  = xQueueCreate(NOTIF_QUEUE_LEN, sizeof(NotifItem));
+    _q_device_info = xQueueCreate(NOTIF_QUEUE_LEN_AUTH, sizeof(NotifItem));
     _op_sem = xSemaphoreCreateBinary();
     _connected_sem = xSemaphoreCreateBinary();
     _disc_sem = xSemaphoreCreateBinary();
@@ -1021,14 +1043,32 @@ bool ble_manager_send_get_async(uint8_t piid, uint32_t poll_seq) { return _send_
 bool ble_manager_send_set_async(uint8_t piid, uint32_t value, uint32_t poll_seq) { return _send_set_async(piid, value, poll_seq, false); }
 bool ble_manager_send_set_nr_async(uint8_t piid, uint32_t value) { return _send_set_async(piid, value, 0, true); }
 
-void ble_manager_set_enabled(bool enabled) {
+bool ble_manager_set_enabled(bool enabled) {
+    bool confirmed = true;
     _enabled = enabled;
     if (enabled) {
         if (_state == BLE_IDLE) _set_state(BLE_SCANNING);
     } else {
-        if (_connected) ble_manager_disconnect();
+        if (_connected) confirmed = ble_manager_disconnect();
         if (_state != BLE_IDLE) _set_state(BLE_IDLE);
     }
+    return confirmed;
 }
 
 bool ble_manager_is_enabled(void) { return _enabled; }
+
+bool ble_manager_send_cloud_set(uint8_t piid, uint32_t value, const char *cloud_id) {
+    uint8_t seq = _seq;
+    if (!ble_manager_is_ready() || !_send_set_async(piid,value,0,false)) return false;
+    for (int i=0; i<MAX_PENDING; ++i) {
+        if (_pending[i].in_use && _pending[i].seq == seq && _pending[i].type == PENDING_SET) {
+            snprintf(_pending[i].cloud_id,sizeof(_pending[i].cloud_id),"%s",cloud_id);
+            return true;
+        }
+    }
+    return false;
+}
+bool ble_manager_has_cloud_pending(void) {
+    for (int i=0;i<MAX_PENDING;++i) if (_pending[i].in_use && _pending[i].cloud_id[0]) return true;
+    return false;
+}

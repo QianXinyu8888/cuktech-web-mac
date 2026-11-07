@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cuktech-live",
+  "workers_dev": false,
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-01",
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": { "bindings": [{ "name": "ROOM", "class_name": "TelemetryRoom" }, { "name": "LOGIN_LIMITER", "class_name": "LoginLimiter" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TelemetryRoom"] }, { "tag": "v2", "new_sqlite_classes": ["LoginLimiter"] }]
+}

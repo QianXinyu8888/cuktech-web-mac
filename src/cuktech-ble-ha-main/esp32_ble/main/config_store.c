@@ -67,6 +67,8 @@ bool config_store_load(DeviceConfig *cfg) {
         return false;
     }
 
+    config_store_apply_defaults(cfg);
+
     /* 读取时用 DEFAULT_* 作为回退，避免空密码导致 4-way 握手超时 */
     _str_def(h, "wifi_ssid", cfg->wifi_ssid, sizeof(cfg->wifi_ssid), DEFAULT_WIFI_SSID);
     _str_def(h, "wifi_pass", cfg->wifi_pass, sizeof(cfg->wifi_pass), DEFAULT_WIFI_PASS);
@@ -81,6 +83,12 @@ bool config_store_load(DeviceConfig *cfg) {
     uint8_t en = 1;
     if (nvs_get_u8(h, "mqtt_en", &en) == ESP_OK) cfg->mqtt_enable = (en != 0);
     else cfg->mqtt_enable = DEFAULT_MQTT_ENABLE;
+
+    _str(h, "cloud_url", cfg->cloud_url, sizeof(cfg->cloud_url));
+    _str(h, "cloud_token", cfg->cloud_token, sizeof(cfg->cloud_token));
+    uint8_t cloud_en = 0;
+    nvs_get_u8(h, "cloud_en", &cloud_en);
+    cfg->cloud_enabled = cloud_en != 0;
 
     uint8_t bemfa_en = 0;
     if (nvs_get_u8(h, "bemfa_en", &bemfa_en) == ESP_OK) cfg->bemfa_enable = (bemfa_en != 0);
@@ -121,6 +129,9 @@ bool config_store_save(const DeviceConfig *cfg) {
     nvs_set_str(h, "mqtt_user", cfg->mqtt_user);
     nvs_set_str(h, "mqtt_pass", cfg->mqtt_pass);
     nvs_set_str(h, "mqtt_topic", cfg->mqtt_topic_prefix);
+    nvs_set_str(h, "cloud_url", cfg->cloud_url);
+    nvs_set_str(h, "cloud_token", cfg->cloud_token);
+    nvs_set_u8(h, "cloud_en", cfg->cloud_enabled ? 1 : 0);
     nvs_set_u8(h, "mqtt_en", cfg->mqtt_enable ? 1 : 0);
     nvs_set_u8(h, "bemfa_en", cfg->bemfa_enable ? 1 : 0);
     nvs_set_str(h, "bemfa_uid", cfg->bemfa_uid);

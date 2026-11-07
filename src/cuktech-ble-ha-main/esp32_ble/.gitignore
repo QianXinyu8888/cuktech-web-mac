@@ -1,0 +1,6 @@
+/build*/
+/sdkconfig
+/sdkconfig.old
+/managed_components/
+/main/embedded_files.h
+!/dependencies.lock

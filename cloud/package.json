@@ -1,0 +1,17 @@
+{
+  "name": "cuktech-cloud",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "dev": "wrangler dev",
+    "dry-run": "wrangler deploy --dry-run",
+    "pretest": "node scripts/sync-web.mjs",
+    "predev": "node scripts/sync-web.mjs",
+    "predry-run": "node scripts/sync-web.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20261104.0-beta",
+    "wrangler": "^4.0.0"
+  }
+}

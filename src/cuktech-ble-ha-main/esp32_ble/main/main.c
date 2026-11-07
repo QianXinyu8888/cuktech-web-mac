@@ -1,12 +1,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
 #include "esp_system.h"
+#include "esp_random.h"
+#include "bootloader_random.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -21,6 +24,8 @@
 #include "config_store.h"
 #include "http_server.h"
 #include "bemfa.h"
+#include "cloud_bridge.h"
+#include "automation_store.h"
 
 #if ENABLE_MQTT
 #include "mqtt_client.h"
@@ -45,7 +50,7 @@ QueueHandle_t result_queue = NULL;
 // Created in system_manager, taken by ble_task to wait (timeout = BLE_CONNECT_DELAY_S s).
 // Given by handle_ble_control() when frontend user clicks "连接设备".
 static SemaphoreHandle_t ble_connect_sem = NULL;
-#define BLE_CONNECT_DELAY_S 60
+#define BLE_CONNECT_DELAY_S 10
 
 // ============================================================
 // Shared state
@@ -59,6 +64,30 @@ typedef struct {
 } PortData;
 
 static PortData port_data[4] = {};
+static uint32_t port_sample_time[4], port_sample_seq[4];
+static AutoEngine automation;
+static SemaphoreHandle_t automation_mutex;
+static bool automation_persist_pending;
+static bool automation_storage_healthy;
+static bool automation_restart_paused[4];
+static uint32_t monotonic_seconds(void) { return (uint32_t)(esp_timer_get_time()/1000000); }
+static void automation_result(unsigned port, bool success) {
+    if (!automation_mutex || port>=4) return;
+    xSemaphoreTake(automation_mutex,portMAX_DELAY);
+    bool consumed=auto_engine_result(&automation,port,monotonic_seconds(),success);
+    if (consumed && !automation_store_save(&automation.config)) {
+        automation_persist_pending=true;
+        snprintf(automation.ports[port].error,sizeof automation.ports[port].error,"nvs_save_failed");
+    }
+    xSemaphoreGive(automation_mutex);
+}
+static bool automation_state_json(char *out,size_t capacity) {
+    if(!automation_mutex || !automation_storage_healthy)return false;
+    xSemaphoreTake(automation_mutex,portMAX_DELAY);
+    bool ok=cloud_format_automation(&automation,out,capacity);
+    xSemaphoreGive(automation_mutex);return ok;
+}
+
 static uint32_t settings[32] = {};
 static bool settings_valid[32] = {};
 // Known device defaults (can't GET to read actual values)
@@ -81,6 +110,8 @@ static void _init_settings_defaults(void) {
 static uint32_t protocol_extend_val = PIID21_ALL_ON;
 static bool protocol_extend_valid = true;
 static uint32_t port_ctrl_val = 0xFF;  // assume all ports on (can't GET to read actual)
+static bool cloud_result_waiting = false;
+static bool port_ctrl_confirmed = false; // only actual remote SET16 result establishes enabled state
 static bool port_ctrl_valid = true;    // track SET updates
 static bool ble_enabled = true;        // BLE connection enable/disable switch
 static bool ble_ready_flag = false;
@@ -103,6 +134,67 @@ static const char* PROTO_NAMES[] = {"idle","5V","5V","QC","AFC","FCP","SCP","PD"
 static const int PROTO_NAMES_LEN = sizeof(PROTO_NAMES)/sizeof(PROTO_NAMES[0]);
 static const char* get_proto_name(uint8_t code) {
     return (code < PROTO_NAMES_LEN) ? PROTO_NAMES[code] : "?";
+}
+
+/* Copy only the telemetry whitelist while holding the app state lock. */
+static bool get_cloud_snapshot(CloudSnapshot *snapshot) {
+    if (!state_mutex || xSemaphoreTake(state_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    snapshot->uptime_ms = esp_timer_get_time() / 1000;
+    snapshot->ble_connected = ble_ready_flag;
+    for (int i = 0; i < 4; ++i) {
+        PortData p = port_data[i];
+        snapshot->ports[i] = (CloudPort){ .voltage=p.voltage, .current=p.current,
+            .power=p.power, .active=p.active, .valid=p.valid && ble_ready_flag && port_sample_time[i] && monotonic_seconds()>=port_sample_time[i] && monotonic_seconds()-port_sample_time[i]<=30,
+            .enabled_known=port_ctrl_confirmed && ble_ready_flag, .enabled=(port_ctrl_val & (1U<<i))!=0 };
+        snprintf(snapshot->ports[i].protocol, sizeof(snapshot->ports[i].protocol), "%s", get_proto_name(p.protocol));
+    }
+    xSemaphoreGive(state_mutex);
+    return true;
+}
+
+static uint64_t cloud_wall_ms(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+static bool dispatch_cloud_command(const CloudCommand *command) {
+    if (command->action==CLOUD_ACTION_AUTOMATION) {
+        if (!automation_mutex) return false;
+        if (!automation_storage_healthy) { cloud_bridge_complete(command->id,false,"nvs_load_failed"); return true; }
+        bool ok=false; const char *error="nvs_save_failed";
+        xSemaphoreTake(automation_mutex,portMAX_DELAY);
+        bool busy=automation_persist_pending;
+        for(int i=0;i<4;i++) if(automation.ports[i].inflight)busy=true;
+        if(busy) error="automation_busy";
+        else if(cloud_wall_ms()>=command->expires_at) error="expired";
+        else if(automation_store_save(&command->automation)) {
+            for(int i=0;i<4;i++) {
+                bool paused=auto_restart_paused(&automation.config.ports[i],&command->automation.ports[i],automation_restart_paused[i]);
+                if(automation_restart_paused[i] && !paused) auto_engine_reset_port(&automation,i);
+                automation_restart_paused[i]=paused;
+            }
+            auto_engine_configure(&automation,&command->automation);ok=true;
+        }
+        xSemaphoreGive(automation_mutex);
+        cloud_bridge_complete(command->id,ok,ok?NULL:error);
+        return true;
+    }
+    BleCommand cmd = {.piid=command->piid, .value=command->value, .cloud_expires_at=command->expires_at};
+    strcpy(cmd.cloud_id, command->id);
+    cmd.type = command->action==CLOUD_ACTION_PORT ? CMD_PORT :
+        command->action==CLOUD_ACTION_SET ? CMD_SET : CMD_CLOUD_BLE;
+    if (xQueueSend(urgent_queue, &cmd, 0) != pdTRUE) return false;
+    if (cmd.type==CMD_CLOUD_BLE && cmd.value && ble_connect_sem) xSemaphoreGive(ble_connect_sem);
+    return true;
+}
+static bool get_cloud_settings(char *out, size_t capacity) {
+    CloudSettings snapshot={.device_model=DEVICE_MODEL,.firmware_version=FW_VERSION};
+    LOCK_STATE();
+    memcpy(snapshot.values, settings, sizeof(settings)); memcpy(snapshot.valid, settings_valid, sizeof(settings_valid));
+    snapshot.values[16]=port_ctrl_val & 15; snapshot.valid[16]=port_ctrl_confirmed && ble_ready_flag;
+    snapshot.values[21]=protocol_extend_val; snapshot.valid[21]=protocol_extend_valid;
+    snapshot.protocol_extend=protocol_extend_val;
+    UNLOCK_STATE();
+    return cloud_format_settings(&snapshot,out,capacity);
 }
 
 static uint8_t estimate_protocol(uint8_t piid, float voltage, uint8_t code,
@@ -218,7 +310,7 @@ static bool handle_port_control(const char *port, const char *action) {
     else if (strcmp(port, "a") == 0) bit = 3;
     if (bit < 0) return false;
     bool on = (strcmp(action, "on") == 0);
-    BleCommand cmd = {CMD_PORT, (uint8_t)bit, on ? 1 : 0, 0};
+    BleCommand cmd = {.type=CMD_PORT, .piid=(uint8_t)bit, .value=on ? 1 : 0, .poll_seq=0};
     if (xQueueSend(urgent_queue, &cmd, pdMS_TO_TICKS(2000)) != pdTRUE) {
         ESP_LOGW(TAG, "HTTP PORT %s %s dropped (queue full)", port, action);
         return false;
@@ -229,7 +321,7 @@ static bool handle_port_control(const char *port, const char *action) {
 
 static bool handle_setting_set(int piid, int value) {
     if (piid <= 0 || piid >= 32) return false;
-    BleCommand cmd = {CMD_SET, (uint8_t)piid, (uint32_t)value, 0};
+    BleCommand cmd = {.type=CMD_SET, .piid=(uint8_t)piid, .value=(uint32_t)value, .poll_seq=0};
     if (xQueueSend(urgent_queue, &cmd, pdMS_TO_TICKS(2000)) != pdTRUE) {
         ESP_LOGW(TAG, "HTTP SET piid=%d dropped (queue full)", piid);
         return false;
@@ -251,7 +343,7 @@ static bool handle_protocol_toggle(const char *port, const char *protocol, bool 
             uint32_t val = protocol_extend_val;
             if (on) val |= (1 << map[i].bit);
             else val &= ~(1 << map[i].bit);
-            BleCommand cmd = {CMD_SET, 21, val, 0};
+            BleCommand cmd = {.type=CMD_SET, .piid=21, .value=val, .poll_seq=0};
             if (xQueueSend(urgent_queue, &cmd, pdMS_TO_TICKS(2000)) != pdTRUE) {
                 ESP_LOGW(TAG, "HTTP PROTO %s %s dropped (queue full)", port, protocol);
                 return false;
@@ -377,7 +469,7 @@ static void mqtt_event_handler(void* arg, esp_event_base_t base, int32_t id, voi
                     uint8_t piid = (uint8_t)cJSON_GetNumberValue(piid_item);
                     uint32_t val = (uint32_t)cJSON_GetNumberValue(val_item);
                     if (piid > 0) {
-                        BleCommand cmd = {CMD_SET, piid, val, 0};
+                        BleCommand cmd = {.type=CMD_SET, .piid=piid, .value=val, .poll_seq=0};
                         if (xQueueSend(urgent_queue, &cmd, pdMS_TO_TICKS(2000)) != pdTRUE) {
                             ESP_LOGW(TAG, "MQTT SET piid=%d dropped (queue full)", piid);
                         }
@@ -402,7 +494,7 @@ static void mqtt_event_handler(void* arg, esp_event_base_t base, int32_t id, voi
                     else if (strcmp(pname, "a")  == 0) bit = 3;
                     if (bit >= 0) {
                         bool on = (strcmp(action, "on") == 0);
-                        BleCommand cmd = {CMD_PORT, (uint8_t)bit, on ? 1 : 0, 0};
+                        BleCommand cmd = {.type=CMD_PORT, .piid=(uint8_t)bit, .value=on ? 1 : 0, .poll_seq=0};
                         if (xQueueSend(urgent_queue, &cmd, pdMS_TO_TICKS(2000)) != pdTRUE) {
                             ESP_LOGW(TAG, "MQTT PORT %s %s dropped (queue full)", pname, action);
                         }
@@ -532,17 +624,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t base, int32_t id, voi
 /* Dedicated reconnect task — never blocks the Event Loop */
 static void wifi_reconnect_task(void *arg) {
     while (1) {
-        /* Wait for disconnect with both bits cleared */
-        xEventGroupWaitBits(sys_events, SYS_EVT_WIFI_READY,
-                            pdFALSE, pdFALSE, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(100));  /* debounce */
-        /* WIFI_READY is clear → we are disconnected → reconnect */
+        /* Retry even when the very first connection never succeeded. */
         if (!(xEventGroupGetBits(sys_events) & SYS_EVT_WIFI_READY)) {
             int d = (wifi_retry_count < 5) ? (1000 * (1 << wifi_retry_count)) : 30000;
             if (d > 30000) d = 30000;
             vTaskDelay(pdMS_TO_TICKS(d));
-            esp_wifi_connect();
-        }
+            if (!(xEventGroupGetBits(sys_events) & SYS_EVT_WIFI_READY)) esp_wifi_connect();
+        } else vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -553,7 +641,7 @@ static void wifi_reconnect_task(void *arg) {
 static void on_ble_state_change(BLEState old_state, BLEState new_state) {
     // Notify app_task immediately on state changes (especially disconnect).
     // Use a short timeout to avoid deadlocking ble_task if app_task is stuck.
-    BleResult res = {RES_BLE_STATUS, true, 0, (uint32_t)(new_state == BLE_READY), 0};
+    BleResult res = {.type=RES_BLE_STATUS, .success=true, .piid=0, .value=(uint32_t)(new_state == BLE_READY), .poll_seq=0};
     if (xQueueSend(result_queue, &res, pdMS_TO_TICKS(500)) != pdTRUE) {
         ESP_LOGW(TAG, "BLE state change dropped (queue full)");
     }
@@ -590,6 +678,7 @@ static void ble_task(void *pvParameters) {
     BleCommand cmd;
     BleResult res;
     bool was_ready = false;
+    BleCommand cloud_ble_pending={0};
     // NOTE: Device does NOT support MiOT GET commands.
     // Port data comes via push notifications only.
     // Settings can only be changed via SET, not read via GET.
@@ -603,6 +692,8 @@ static void ble_task(void *pvParameters) {
         int drain_cnt = 0;
         do {
             cmd.type = CMD_NOP;
+            LOCK_STATE(); bool awaiting_result=cloud_result_waiting; UNLOCK_STATE();
+            if (awaiting_result || ble_manager_has_cloud_pending()) break;
             if (urgent_queue && xQueueReceive(urgent_queue, &cmd, 0) == pdTRUE) {
                 did_work = true;
             } else if (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
@@ -610,6 +701,44 @@ static void ble_task(void *pvParameters) {
             }
             if (cmd.type != CMD_NOP) {
                 drain_cnt++;
+                if (cmd.cloud_id[0]) {
+                    if (!strncmp(cmd.cloud_id,"auto:",5)) {
+                        unsigned port=(unsigned)(cmd.cloud_id[5]-'0');
+                        LOCK_STATE();
+                        bool ready=ble_ready_flag && port_ctrl_confirmed && port<4 &&
+                            port_sample_time[port] && monotonic_seconds()-port_sample_time[port]<=30;
+                        uint32_t mask=port_ctrl_val & 15;
+                        UNLOCK_STATE();
+                        if(!ready || !ble_manager_is_ready() || !ble_manager_send_cloud_set(16,mask & ~(1U<<port),cmd.cloud_id))
+                            automation_result(port,false);
+                        else { LOCK_STATE(); cloud_result_waiting=true; UNLOCK_STATE(); }
+                        continue;
+                    }
+                    if (cloud_wall_ms()>=cmd.cloud_expires_at) {
+                        cloud_bridge_complete(cmd.cloud_id,false,"expired"); continue;
+                    }
+                    if (cmd.type==CMD_CLOUD_BLE) {
+                        bool confirmed=ble_manager_set_enabled(cmd.value!=0);
+                        ble_enabled=cmd.value!=0;
+                        if (!confirmed) cloud_bridge_complete(cmd.cloud_id,false,"disconnect_unconfirmed");
+                        else if (!cmd.value || ble_manager_is_ready()) cloud_bridge_complete(cmd.cloud_id,true,NULL);
+                        else cloud_ble_pending=cmd;
+                    } else if (!ble_manager_is_ready()) {
+                        cloud_bridge_complete(cmd.cloud_id,false,"ble_disconnected");
+                    } else {
+                        uint8_t piid=cmd.piid; uint32_t value=cmd.value;
+                        if (cmd.type==CMD_PORT) {
+                            LOCK_STATE(); bool known=port_ctrl_confirmed; uint32_t current=port_ctrl_val; UNLOCK_STATE(); piid=16;
+                            if (!cloud_port_mask(cmd.piid,cmd.value!=0,known,current,&value)) {
+                                cloud_bridge_complete(cmd.cloud_id,false,"port_state_unknown"); continue;
+                            }
+                        }
+                        if (!ble_manager_send_cloud_set(piid,value,cmd.cloud_id))
+                            cloud_bridge_complete(cmd.cloud_id,false,"ble_send_failed");
+                        else { LOCK_STATE(); cloud_result_waiting=true; UNLOCK_STATE(); }
+                    }
+                    continue;
+                }
                 switch (cmd.type) {
                 case CMD_GET: {
                     uint32_t val = 0;
@@ -633,7 +762,7 @@ static void ble_task(void *pvParameters) {
                     bool ok = ble_manager_miot_set(cmd.piid, cmd.value);
                     if (ok) {
                         LOCK_STATE();
-                        if (cmd.piid == 16) { port_ctrl_val = cmd.value; port_ctrl_valid = true; }
+                        if (cmd.piid == 16) { port_ctrl_val = cmd.value; port_ctrl_valid = true; port_ctrl_confirmed = false; }
                         else if (cmd.piid < 32) { settings[cmd.piid] = cmd.value; settings_valid[cmd.piid] = true; }
                         if (cmd.piid == 21) { protocol_extend_val = cmd.value; ble_manager_store_setting(21, cmd.value); }
                         UNLOCK_STATE();
@@ -642,7 +771,7 @@ static void ble_task(void *pvParameters) {
                     } else {
                         ESP_LOGW(TAG, "SET piid=%d val=%lu FAILED", cmd.piid, (unsigned long)cmd.value);
                     }
-                    res = (BleResult){RES_SET, ok, cmd.piid, cmd.value, 0};
+                    res = (BleResult){.type=RES_SET, .success=ok, .piid=cmd.piid, .value=cmd.value, .poll_seq=0};
                     xQueueSend(result_queue, &res, 0);
                     break;
                 }
@@ -653,6 +782,7 @@ static void ble_task(void *pvParameters) {
                     if (cmd.value) current |= (1 << cmd.piid);
                     else current &= ~(1 << cmd.piid);
                     port_ctrl_val = current;
+                    port_ctrl_confirmed = false;
                     port_ctrl_valid = true;
                     UNLOCK_STATE();
                     if (ble_manager_miot_set(16, current)) {
@@ -665,7 +795,7 @@ static void ble_task(void *pvParameters) {
                             break;
                         }
                     }
-                    res = (BleResult){RES_SET, true, 16, current, 0};
+                    res = (BleResult){.type=RES_SET, .success=true, .piid=16, .value=current, .poll_seq=0};
                     xQueueSend(result_queue, &res, 0);
                     last_set16_time = esp_timer_get_time() / 1000;
                     break;
@@ -682,12 +812,22 @@ static void ble_task(void *pvParameters) {
         // BLE state machine & response processing
         ble_manager_loop();
 
+        if (cloud_ble_pending.cloud_id[0]) {
+            if (cloud_wall_ms()>=cloud_ble_pending.cloud_expires_at) {
+                cloud_bridge_complete(cloud_ble_pending.cloud_id,false,"ble_connect_timeout");
+                cloud_ble_pending.cloud_id[0]=0;
+            } else if (ble_manager_is_ready()) {
+                cloud_bridge_complete(cloud_ble_pending.cloud_id,true,NULL);
+                cloud_ble_pending.cloud_id[0]=0;
+            }
+        }
+
         // State change notification
         {
             bool ready = ble_manager_is_ready();
             if (ready != was_ready) {
                 was_ready = ready;
-                res = (BleResult){RES_BLE_STATUS, true, 0, (uint32_t)ready, 0};
+                res = (BleResult){.type=RES_BLE_STATUS, .success=true, .piid=0, .value=(uint32_t)ready, .poll_seq=0};
                 xQueueSend(result_queue, &res, portMAX_DELAY);
             }
         }
@@ -831,6 +971,7 @@ static void app_task(void* pvParameters) {
                         res.protocol, res.status,
                         res.status != 0 || res.voltage > 0.5f, true
                     };
+                    port_sample_time[idx]=monotonic_seconds(); if(++port_sample_seq[idx]==0)++port_sample_seq[idx];
                     bool a = port_data[idx].active;
                     UNLOCK_STATE();
                     publish_port(idx);
@@ -875,6 +1016,7 @@ static void app_task(void* pvParameters) {
                         }
                     }
                     port_data[idx] = (PortData){v, c, v*c, proto, st, st!=0||v>0.5f, true};
+                    port_sample_time[idx]=monotonic_seconds(); if(++port_sample_seq[idx]==0)++port_sample_seq[idx];
                     bool publish = false;
                     if (was_active != port_data[idx].active) publish = true;
                     if (!port_data[idx].valid) publish = true;
@@ -911,7 +1053,7 @@ static void app_task(void* pvParameters) {
             case RES_SET: {
                 LOCK_STATE();
                 if (res.success) {
-                    if (res.piid == 16) { port_ctrl_val = res.value; port_ctrl_valid = true; }
+                    if (res.piid == 16) { port_ctrl_val = res.value; port_ctrl_valid = true; port_ctrl_confirmed = res.cloud_id[0] != 0; }
                     else if (res.piid < 32) {
                         settings[res.piid] = res.value;
                         settings_valid[res.piid] = true;
@@ -934,6 +1076,7 @@ static void app_task(void* pvParameters) {
             case RES_BLE_STATUS: {
                 LOCK_STATE();
                 ble_ready_flag = res.value != 0;
+                if (!ble_ready_flag) port_ctrl_confirmed = false;
                 UNLOCK_STATE();
                 publish_status();
                 // Always update Bemfa BLE state regardless of main MQTT
@@ -944,7 +1087,7 @@ static void app_task(void* pvParameters) {
                     // detection uses real hardware protocol codes (PIID 17/18).
                     static const uint8_t INIT_PIIDS[] = {5, 6, 15, 21, 17, 18};
                     for (int i = 0; i < sizeof(INIT_PIIDS); i++) {
-                        BleCommand c = {CMD_GET, INIT_PIIDS[i], 0, 0};
+                        BleCommand c = {.type=CMD_GET, .piid=INIT_PIIDS[i], .value=0, .poll_seq=0};
                         xQueueSend(cmd_queue, &c, 0);
                     }
                 }
@@ -952,6 +1095,9 @@ static void app_task(void* pvParameters) {
             }
             default: break;
             }
+            if (res.cloud_id[0]) { LOCK_STATE(); cloud_result_waiting=false; UNLOCK_STATE(); }
+            if (!strncmp(res.cloud_id,"auto:",5)) automation_result((unsigned)(res.cloud_id[5]-'0'),res.success);
+            else if (res.cloud_id[0]) cloud_bridge_complete(res.cloud_id,res.success,res.success ? NULL : "ble_rejected_or_timeout");
         }
 
         // Slow poll (90s): scene mode, screen time, countdown, trickle
@@ -959,7 +1105,7 @@ static void app_task(void* pvParameters) {
             last_cd_fetch_slow = now;
             static const uint8_t SLOW_PIIDS[] = {5, 6, 9, 10, 11, 12, 15};
             for (int i = 0; i < sizeof(SLOW_PIIDS); i++) {
-                BleCommand c = {CMD_GET, SLOW_PIIDS[i], 0, 0};
+                BleCommand c = {.type=CMD_GET, .piid=SLOW_PIIDS[i], .value=0, .poll_seq=0};
                 xQueueSend(cmd_queue, &c, 0);
             }
         }
@@ -968,7 +1114,7 @@ static void app_task(void* pvParameters) {
             last_cd_fetch_fast = now;
             static const uint8_t FAST_PIIDS[] = {16, 21};
             for (int i = 0; i < sizeof(FAST_PIIDS); i++) {
-                BleCommand c = {CMD_GET, FAST_PIIDS[i], 0, 0};
+                BleCommand c = {.type=CMD_GET, .piid=FAST_PIIDS[i], .value=0, .poll_seq=0};
                 xQueueSend(cmd_queue, &c, 0);
             }
         }
@@ -1008,8 +1154,15 @@ static void ap_reboot_callback(void) {
 }
 
 static void enter_ap_mode(bool net_init_done) {
+    char ap_password[17];
+    uint8_t random_bytes[8];
+    if (!net_init_done) bootloader_random_enable();
+    esp_fill_random(random_bytes, sizeof(random_bytes));
+    if (!net_init_done) bootloader_random_disable();
+    for (size_t i = 0; i < sizeof(random_bytes); i++)
+        snprintf(ap_password + i * 2, 3, "%02x", random_bytes[i]);
     ESP_LOGW(TAG, "No config found — entering AP mode for setup");
-    ESP_LOGW(TAG, "Connect to WiFi: %s  Password: %s", AP_SSID, AP_PASSWORD);
+    ESP_LOGW(TAG, "Connect to WiFi: %s  Password: %s", AP_SSID, ap_password);
     ESP_LOGW(TAG, "Then open: http://192.168.4.1/");
 
     if (!net_init_done) {
@@ -1027,12 +1180,12 @@ static void enter_ap_mode(bool net_init_done) {
         .ap = {
             .ssid = AP_SSID,
             .ssid_len = sizeof(AP_SSID) - 1,
-            .password = AP_PASSWORD,
             .max_connection = 4,
             .authmode = WIFI_AUTH_WPA2_PSK,
             .channel = 6,  // 避开最拥挤的 channel 1
         },
     };
+    memcpy(ap_config.ap.password, ap_password, sizeof(ap_password));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -1052,6 +1205,51 @@ static void enter_ap_mode(bool net_init_done) {
 // ============================================================
 // System Manager — startup coordinator
 // ============================================================
+
+static void automation_task(void *arg) {
+    (void)arg;
+    TickType_t wake=xTaskGetTickCount(); uint32_t last_seq[4]={0},last_checkpoint=0;
+    float checkpoint_wh[4]={0};
+    for (;;) {
+        vTaskDelayUntil(&wake,pdMS_TO_TICKS(1000));
+        uint32_t now=monotonic_seconds();
+        PortData ports[4]; uint32_t times[4], sequences[4]; bool ready, known; uint32_t mask;
+        LOCK_STATE(); memcpy(ports,port_data,sizeof ports); memcpy(times,port_sample_time,sizeof times); memcpy(sequences,port_sample_seq,sizeof sequences);
+        ready=ble_ready_flag; known=port_ctrl_confirmed; mask=port_ctrl_val; UNLOCK_STATE();
+        xSemaphoreTake(automation_mutex,portMAX_DELAY);
+        if(automation_persist_pending && automation_store_save(&automation.config)) {
+            automation_persist_pending=false;
+            for(int i=0;i<4;i++) if(!strcmp(automation.ports[i].error,"nvs_save_failed")) automation.ports[i].error[0]=0;
+        }
+        for(unsigned i=0;i<4;i++) {
+            bool fresh=ready && ports[i].valid && times[i] && now>=times[i] && now-times[i]<=30;
+            bool new_sample=fresh && cloud_sample_new(sequences[i],last_seq[i],times[i],now);
+            if (automation_restart_paused[i]) {
+                snprintf(automation.ports[i].error,sizeof automation.ports[i].error,"limit_restart_unavailable");
+                continue;
+            }
+            if (new_sample) {
+                last_seq[i]=sequences[i];
+                auto_engine_feed(&automation,i,times[i],true,ports[i].voltage,ports[i].current,ports[i].active,known,(mask&(1U<<i))!=0);
+            } else if (!fresh) auto_engine_feed(&automation,i,now,false,0,0,false,false,false);
+            if (automation.ports[i].pending && !known && fresh)
+                snprintf(automation.ports[i].error,sizeof automation.ports[i].error,"port_state_unknown");
+            else if (known && !strcmp(automation.ports[i].error,"port_state_unknown")) automation.ports[i].error[0]=0;
+            if(!automation_persist_pending && new_sample && known && auto_engine_take_off(&automation,i,now)) {
+                BleCommand cmd={.type=CMD_PORT}; snprintf(cmd.cloud_id,sizeof cmd.cloud_id,"auto:%u",i);
+                if(xQueueSend(urgent_queue,&cmd,0)!=pdTRUE) auto_engine_result(&automation,i,now,false);
+            }
+        }
+        bool changed=false;
+        for(int i=0;i<4;i++) if(automation.ports[i].charging && automation.config.ports[i].limit_wh>0 && automation.ports[i].session_wh!=checkpoint_wh[i])changed=true;
+        if(changed && now-last_checkpoint>=30) {
+            last_checkpoint=now;
+            if(!automation_progress_save(&automation)) ESP_LOGE(TAG,"Automation progress checkpoint failed; restart will require rearming");
+            else for(int i=0;i<4;i++) checkpoint_wh[i]=automation.ports[i].session_wh;
+        }
+        xSemaphoreGive(automation_mutex);
+    }
+}
 
 static void system_manager(void) {
     sys_events = xEventGroupCreate();
@@ -1091,10 +1289,9 @@ static void system_manager(void) {
                                             pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
     if (!(bits & SYS_EVT_WIFI_READY)) {
         ESP_LOGW(TAG, "WiFi failed to connect within 30s — proceeding in AP mode");
-        enter_ap_mode(true);  // netif/event_loop already initialized
-        return;
+        ESP_LOGW(TAG,"Continuing offline so saved automation remains active");
     }
-    /* Start reconnect task only AFTER first successful connection */
+    /* Keep reconnecting even if the first connection did not succeed. */
     xTaskCreatePinnedToCore(wifi_reconnect_task, "wifi_reconn", 2048, NULL, 3, NULL, 0);
 
     /* ---- Stage: HTTP ---- */
@@ -1108,13 +1305,29 @@ static void system_manager(void) {
     urgent_queue = xQueueCreate(4, sizeof(BleCommand));
     result_queue = xQueueCreate(48, sizeof(BleResult));
     state_mutex = xSemaphoreCreateMutex();
+    automation_mutex = xSemaphoreCreateMutex();
+    AutoConfig saved={0};
+    AutoStoreLoad loaded=automation_store_load(&saved);
+    automation_storage_healthy=loaded!=AUTO_STORE_ERROR;
+    auto_engine_init(&automation,loaded==AUTO_STORE_LOADED?&saved:NULL);
+    if(loaded==AUTO_STORE_LOADED) automation_progress_load(&automation);
+    for(int i=0;i<4;i++) if(loaded==AUTO_STORE_LOADED && saved.ports[i].limit_wh>0) {
+        automation_restart_paused[i]=true;
+        snprintf(automation.ports[i].error,sizeof automation.ports[i].error,"limit_restart_unavailable");
+    }
+    if (!automation_storage_healthy) ESP_LOGE(TAG,"Automation storage unreadable; rules disabled");
+    if (!automation_mutex) ESP_LOGE(TAG,"Automation mutex allocation failed");
 
     http_server_set_callbacks(get_port_data_json, get_settings_json,
                               handle_port_control, handle_setting_set,
                               handle_protocol_toggle,
                               handle_ble_control);
-    http_server_start(&g_cfg, ap_reboot_callback);
-    ESP_LOGI(TAG, "HTTP server ready");
+    if (!g_cfg.cloud_enabled) {
+        http_server_start(&g_cfg, ap_reboot_callback);
+        ESP_LOGI(TAG, "HTTP server ready");
+    } else {
+        ESP_LOGI(TAG, "Local HTTP server disabled in cloud mode");
+    }
 
     /* Create semaphore for delayed BLE connection. ble_task will wait
        on this semaphore; handle_ble_control can give it to wake up early. */
@@ -1130,12 +1343,15 @@ static void system_manager(void) {
     xTaskCreatePinnedToCore(ble_task, "ble", 16384, NULL, 2, NULL, 1);
 #endif
     xTaskCreatePinnedToCore(app_task,  "app", 7168,  NULL, 1, NULL, 0);
+    if (automation_mutex && automation_storage_healthy && xTaskCreate(automation_task,"automation",4096,NULL,1,NULL)!=pdPASS)
+        ESP_LOGE(TAG,"Automation task allocation failed");
 
     /* ---- Stage: MQTT + Bemfa ---- */
     advance_stage(); // STAGE_MQTT
     vTaskDelay(pdMS_TO_TICKS(2000));  // brief settle before MQTT dials out
     mqtt_init();
     bemfa_init(&g_cfg, handle_port_control, handle_ble_control);
+    cloud_bridge_start(&g_cfg, get_cloud_snapshot, dispatch_cloud_command, get_cloud_settings, automation_state_json);
 
     advance_stage(); // STAGE_RUNNING
     ESP_LOGI(TAG, "System startup complete — all services running");

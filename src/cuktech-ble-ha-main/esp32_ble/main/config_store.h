@@ -15,6 +15,9 @@ typedef struct {
     char mqtt_pass[65];
     char mqtt_topic_prefix[64];
     bool mqtt_enable;
+    bool cloud_enabled;
+    char cloud_url[256];
+    char cloud_token[257];
     bool bemfa_enable;
     char bemfa_uid[33];
     char bemfa_name_c1[32];

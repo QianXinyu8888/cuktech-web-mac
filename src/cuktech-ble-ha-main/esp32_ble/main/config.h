@@ -14,7 +14,7 @@
 #define DEFAULT_DEVICE_MAC       ""
 #define DEFAULT_DEVICE_TOKEN     ""
 #define DEFAULT_DEVICE_BLE_KEY   ""
-#define DEFAULT_MQTT_ENABLE      true
+#define DEFAULT_MQTT_ENABLE      false
 #define DEFAULT_MQTT_BROKER      ""
 #define DEFAULT_MQTT_PORT        1883
 #define DEFAULT_MQTT_USER        ""
@@ -33,4 +33,3 @@
 
 // --- AP 配置模式 ---
 #define AP_SSID         "CUKTECH-Setup"
-#define AP_PASSWORD     "12345678"

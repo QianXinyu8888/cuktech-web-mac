@@ -186,7 +186,7 @@
                 fwEl.textContent = I18N.t('common.firmware', { version: dev.firmware });
             } else {
                 delete fwEl.dataset.firmware;
-                fwEl.textContent = I18N.t('common.disconnected');
+                fwEl.textContent = I18N.t(dev.bleConnected ? 'common.connected' : 'common.disconnected');
             }
         }
 
@@ -1458,13 +1458,13 @@
         function updateSummary(ports) {
             let totalPower = 0, activeCount = 0, maxV = 0;
             for (const [id, port] of Object.entries(ports || {})) {
-                if ((port.current > 0 || port.power > 0) && port.enabled !== false) {
+                if ((port.current > 0 || port.power > 0) && (port.enabledKnown === false || port.enabled !== false)) {
                     totalPower += port.power;
                     activeCount++;
                     maxV = Math.max(maxV, port.voltage);
                 }
             }
-            document.getElementById('totalPower').textContent = totalPower.toFixed(1);
+            document.getElementById('totalPower').textContent = Object.values(ports || {}).some(p => p.valid !== false) ? totalPower.toFixed(1) : '—';
             // 功率占比条：与 phone.html 的 mini-chart 同款——近 30 次采样的总功率，
             // 每根柱的高度是该次功率占这段时间峰值的比例
             if (!updateSummary._hist) updateSummary._hist = [];
@@ -1563,6 +1563,7 @@
                 const port = ports[id] || { voltage: 0, current: 0, power: 0, enabled: false, protocol: 'idle' };
                 const key = PORT_KEY_MAP[id];
                 const checked = (isRecent() && savedChecks.hasOwnProperty(key)) ? savedChecks[key] : port.enabled;
+                const valid = port.valid !== false;
                 const pct = loadPct(port.power, id);
                 // 负载条的分母是本口上限（见 PORT_MAX_W），不是实时功率的比例——
                 // 必须写在提示里，否则"22W 只填了 18%"看起来像 bug。
@@ -1575,17 +1576,17 @@
                                 ${name}
                             </span>
                             <label class="port-toggle" onclick="event.stopPropagation()">
-                                <input type="checkbox" id="toggle-${key}" ${checked ? 'checked' : ''} onchange="togglePort('${key}', this.checked)">
+                                <input type="checkbox" id="toggle-${key}" ${checked ? 'checked' : ''} ${port.enabledKnown === false ? 'disabled' : ''} onchange="togglePort('${key}', this.checked)">
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="port-power" title="${basis}">
-                            <span class="port-power-value">${port.power.toFixed(1)}</span><span class="port-power-unit">W</span>
+                            <span class="port-power-value">${valid ? port.power.toFixed(1) : '—'}</span><span class="port-power-unit">W</span>
                         </div>
                         <div class="port-load${pct ? '' : ' is-idle'}" title="${basis}"><div class="port-load-fill" data-port="${id}" style="width:${pct}%"></div></div>
                         <div class="port-sub">
-                            <span class="port-va">${port.voltage.toFixed(1)}V · ${port.current.toFixed(1)}A</span>
-                            <span class="port-protocol">${port.protocol}</span>
+                            <span class="port-va">${valid ? `${port.voltage.toFixed(1)}V · ${port.current.toFixed(1)}A` : '—'}</span>
+                            <span class="port-protocol">${valid ? port.protocol : '—'}</span>
                         </div>
                     </div>`;
             }

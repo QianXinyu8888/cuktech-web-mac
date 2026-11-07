@@ -133,6 +133,8 @@ function applyPortsToBucket(b, msg) {
         b.ports[key].w = port.power || 0;
         b.ports[key].protocol = port.protocol || 'idle';
         b.ports[key].status_raw = port.status_raw;
+        b.ports[key].valid = port.valid;
+        b.ports[key].enabledKnown = port.enabledKnown;
         // 本地刚点过开关时不跟随服务端的旧值（与渲染路径同一套保护）
         if (!isRecentLocal()) b.ports[key].enabled = port.enabled !== false;
     };
@@ -204,6 +206,8 @@ async function fetchStatus() {
                     if (!isRecentLocal()) state.ports[key].enabled = port.enabled !== false;
                     state.ports[key].protocol = port.protocol || 'idle';
                     state.ports[key].status_raw = port.status_raw;
+                state.ports[key].valid = port.valid;
+                state.ports[key].enabledKnown = port.enabledKnown;
                 }
             }
         }
@@ -287,7 +291,7 @@ function renderAll() {
 function renderDeviceArea() {
     let totalW = 0, hasAny = false;
     for (const [key, p] of Object.entries(state.ports)) {
-        if (p.enabled && p.w > 0) { totalW += p.w; hasAny = true; }
+        if ((p.enabled || p.enabledKnown === false) && p.valid !== false && p.w > 0) { totalW += p.w; hasAny = true; }
     }
 
     const unconnectedImg = document.getElementById('unconnectedImg');
@@ -317,7 +321,7 @@ function renderDeviceArea() {
     for (const [key, p] of Object.entries(state.ports)) {
         const mod = document.getElementById('usbModule' + key.toUpperCase());
         const powerEl = document.getElementById('usbPower' + key.toUpperCase());
-        if (p.enabled && p.w > 0) {
+        if ((p.enabled || p.enabledKnown === false) && p.valid !== false && p.w > 0) {
             mod.classList.add('active');
             mod.style.top = modulePositions[key] + 'px';
             powerEl.textContent = p.w.toFixed(1) + 'W';
@@ -352,7 +356,7 @@ function renderPortCtl() {
         const p = state.ports[key];
         const enabled = p.enabled !== false;
         const toggle = document.getElementById('toggle' + key.toUpperCase());
-        if (toggle) toggle.checked = enabled;
+        if (toggle) { toggle.checked = enabled; toggle.disabled = p.enabledKnown === false; }
         const icon = document.querySelector(`#toggle${key.toUpperCase()}`).closest('.port-ctl-item').querySelector('.port-ctl-port-icon img');
         if (icon) {
             icon.src = enabled
@@ -365,9 +369,9 @@ function renderPortCtl() {
 function renderRateCard() {
     let totalW = 0;
     for (const p of Object.values(state.ports)) {
-        if (p.enabled) totalW += p.w;
+        if ((p.enabled || p.enabledKnown === false) && p.valid !== false) totalW += p.w;
     }
-    document.getElementById('totalPowerNum').textContent = totalW.toFixed(1);
+    document.getElementById('totalPowerNum').textContent = Object.values(state.ports).some(p => p.valid !== false) ? totalW.toFixed(1) : '—';
 
     // Check if C3+USB-A merged (0x11 = merged mode)
     const isMerged = state.ports.c3?.status_raw === 0x11;
@@ -384,8 +388,8 @@ function renderRateCard() {
         row.style.display = '';
 
         const p = state.ports[key];
-        const enabled = state.ports[key].enabled;
-        const w = enabled ? p.w : 0;
+        const enabled = state.ports[key].enabled || p.enabledKnown === false;
+        const w = enabled && p.valid !== false ? p.w : 0;
         const status = enabled && w > 0 ? w.toFixed(1) : '--';
         const protocol = enabled && p.protocol ? p.protocol : '';
         const name = (key === 'c3' && isMerged) ? 'C3&A' : PORT_NAMES[key];
@@ -1320,6 +1324,8 @@ function applyFullStatus(data) {
                 if (!isRecentLocal()) state.ports[key].enabled = port.enabled !== false;
                 state.ports[key].protocol = port.protocol || 'idle';
                 state.ports[key].status_raw = port.status_raw;
+                state.ports[key].valid = port.valid;
+                state.ports[key].enabledKnown = port.enabledKnown;
             }
         }
     }
@@ -1339,6 +1345,8 @@ function applyPortUpdate(portId, portData) {
     if (!isRecentLocal()) state.ports[key].enabled = portData.enabled !== false;
     state.ports[key].protocol = portData.protocol || 'idle';
     state.ports[key].status_raw = portData.status_raw;
+    state.ports[key].valid = portData.valid;
+    state.ports[key].enabledKnown = portData.enabledKnown;
     // 500ms 去抖刷新组合图表（数据到达时及时更新，稳定期由 2s 定时器补充）
     if (phoneChartDebounce) clearTimeout(phoneChartDebounce);
     phoneChartDebounce = setTimeout(() => {
