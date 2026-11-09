@@ -17,6 +17,8 @@ bash tests/run_host.sh
 idf.py -DIDF_TARGET=esp32s3 build
 ```
 
+If reusing a `sdkconfig` generated before the BLE notification fix, enable `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL` and `CONFIG_BT_NIMBLE_GATT_SERVER` in `idf.py menuconfig` before building. In ESP-IDF 5.3, incoming ATT notifications depend on both options even when the gateway connects as a central.
+
 `tests/run_host.sh` compiles protocol/config validation against the SDK's actual cJSON with strict warnings and UBSan. It covers WSS URL restrictions, token header-injection prevention, masked-token preservation, accepted/rejected rate messages, fragmented text, all four ports including `valid`, non-finite telemetry, and injected allocation failures.
 
 Generated header, `sdkconfig`, managed component sources, and build output are ignored. The repository contains no cloud credentials. Hardware Wi-Fi/BLE/TLS/heap/reconnect endurance is still required; a successful build does not constitute charger acceptance.
