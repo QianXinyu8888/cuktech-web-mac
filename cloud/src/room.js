@@ -1,5 +1,8 @@
 import { HistoryStore } from './history.js';
 import { validateTelemetry, validateControl, validateSettings, validateCommandResult, decodeSwitches, validateHistoryBatch, validateAutomationState, mergeAutomation, historyMethods, MAX_HISTORY_MESSAGE_BYTES, MAX_MESSAGE_BYTES } from './protocol.js';
+const LIVE_INTERVAL_MS = 1000;
+const IDLE_INTERVAL_MS = 30000;
+const STATUS_FRESHNESS_MS = IDLE_INTERVAL_MS + 15000;
 class DeviceRoom {
  constructor(state,deviceId='default',viewers=null){
   this.deviceId=deviceId;this.state=state;this.viewers=viewers??new Set();this.producer=null;this.latest=null;this.settings=null;this.pending=null;
@@ -40,7 +43,7 @@ class DeviceRoom {
  validViewer(socket){const a=socket.deserializeAttachment();if(a?.role==='viewer' && (!Number.isFinite(a.expiresAt)||a.expiresAt<=Date.now())){socket.close(1008,'Session expired');this.disconnect(socket);return false;}return true;}
  send(socket,data){if(!this.validViewer(socket))return;try{socket.send(JSON.stringify(data));}catch{this.disconnect(socket);}}
  broadcast(data){for(const socket of [...this.viewers])this.send(socket,{...data,device:this.deviceId});}
- rate(){if(this.producer)this.send(this.producer,{type:'rate',intervalMs:this.viewers.size?1000:30000});}
+ rate(){if(this.producer)this.send(this.producer,{type:'rate',intervalMs:this.viewers.size?LIVE_INTERVAL_MS:IDLE_INTERVAL_MS});}
  connect(socket,role,session={}){
   this.state.acceptWebSocket(socket);
   socket.serializeAttachment({role,...session,...(role==='device'?{deviceId:this.deviceId}: {})});
@@ -69,7 +72,7 @@ class DeviceRoom {
   if(data?.type==='command_result'){try{validateCommandResult(data);}catch{socket.close(1008,'Invalid result');this.disconnect(socket);return;}const pending=this.pending;if(pending&&data.id===pending.id){if(Date.now()>=pending.expiresAt)this.failPending('Command timed out',504);else this.finishPending(data.ok?{ok:true}:{ok:false,error:data.error||'Device rejected command'},data.ok?200:502);}return;}
   if(data?.type==='settings'){try{validateSettings(data);const attachment={...a,settings:data};if(new TextEncoder().encode(JSON.stringify(attachment)).length>=2048)throw new Error('Attachment too large');this.settings=data;socket.serializeAttachment(attachment);this.broadcast({type:'settings',...data});this.broadcast({type:'mac-status',data:this.publicStatus()});}catch{socket.close(1008,'Invalid settings');this.disconnect(socket);}return;}
   try{validateTelemetry(data);}catch{socket.close(1008,'Invalid telemetry');this.disconnect(socket);return;}
-  const now=Date.now(), interval=this.viewers.size?1000:30000;
+  const now=Date.now(), interval=this.viewers.size?LIVE_INTERVAL_MS:IDLE_INTERVAL_MS;
   if(a.lastAcceptedAt!==undefined && now-a.lastAcceptedAt<interval)return;
   this.latest={...data,receivedAt:now};
   const attachment={...a,role:'device',lastAcceptedAt:now,latest:this.latest,...(this.settings?{settings:this.settings}:{}),...(a.automationProgress?{automationProgress:a.automationProgress}:{})};
@@ -98,7 +101,9 @@ class DeviceRoom {
  automationResponse(path){const s=this.automationState,common={ok:true,configured:!!s,gateway_connected:!!this.producer,state_fresh:!!this.producer&&!!this.automationFresh};if(path.endsWith('charge-limits'))return {...common,limits:s?Object.fromEntries(Object.entries(s.chargeLimits).map(([p,e])=>[p,{wh:e.wh,mode:e.mode,session_wh:e.sessionWh,fired:e.fired,pending:e.pending,error:e.error}])):{}};return {...common,permanent_ports:s?.permanent??[],full_off_ports:s?.fullOff??{}};}
  get history(){return this._history??=new HistoryStore(this.state.storage.sql);}
  publicStatus(){
-  const settings=this.settings?.settings??{}, connected=!!this.producer&&!!this.latest?.bleConnected&&Number.isFinite(this.latest?.receivedAt)&&Date.now()-this.latest.receivedAt>=0&&Date.now()-this.latest.receivedAt<=15000, value=this.settings?.protocolExtend??0;
+  const settings=this.settings?.settings??{}, value=this.settings?.protocolExtend??0;
+  const age=Date.now()-(this.latest?.receivedAt??NaN);
+  const connected=!!this.producer&&!!this.latest?.bleConnected&&age>=0&&age<=STATUS_FRESHNESS_MS;
   const ports=Object.fromEntries(['c1','c2','c3','a'].map((id,index)=>{const p=this.latest?.ports.find(p=>p.id===id);return [String(index+1),{voltage:p?.voltage??0,current:p?.current??0,power:p?.power??0,active:connected&&(p?.active??false),valid:connected&&(p?.valid??false),protocol:p?.protocol??'idle',enabledKnown:connected&&Object.hasOwn(settings,'16'),enabled:!!((settings['16']??0)&2**index)}];}));
   const automation=this.automationState;
   return {...(automation?{permanent_ports:automation.permanent,full_off_ports:automation.fullOff}:{}),connected,authenticated:connected,connection:{phase:connected?'connected':'disabled'},ports,settings,protocol_extend:value,protocol_switches:decodeSwitches(value),device_model:this.settings?.deviceModel??'',firmware_version:this.settings?.firmwareVersion??'',gateway_connected:!!this.producer,receivedAt:this.latest?.receivedAt??null};
