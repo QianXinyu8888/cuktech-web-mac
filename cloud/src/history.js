@@ -18,8 +18,19 @@ export class HistoryStore {
  save(s,device){const {id,port,start_time,end_time,...data}=s;if(id)this.exec('UPDATE history_sessions SET end_time=?,data=? WHERE id=? AND device=?',end_time,JSON.stringify(data),id,device);else{this.exec('INSERT INTO history_sessions(device,port,start_time,end_time,data) VALUES(?,?,?,?,?)',device,port,start_time,end_time,JSON.stringify(data));s.id=this.rows('SELECT last_insert_rowid() AS id')[0].id;}return s;}
  sessions(device='default',activeOnly=false){return this.rows('SELECT * FROM history_sessions WHERE device=?'+(activeOnly?' AND end_time IS NULL':'')+' ORDER BY start_time DESC,id DESC',device).map(({data,device,...r})=>({...r,...JSON.parse(data)}));}
  get(id,device='default'){return this.sessions(device).find(s=>s.id===id);}
- readings(device='default',start=0,end=Infinity){const rows=this.rows('SELECT data FROM history_minutes WHERE device=? AND minute>=? AND minute<=? ORDER BY minute',device,Math.floor(start/60),Number.isFinite(end)?Math.floor(end/60):Number.MAX_SAFE_INTEGER);return rows.flatMap(r=>unpack(r.data)).filter(s=>s.timestamp>=start&&s.timestamp<=end);}
- points(s,device='default'){if(s.permanent){if(s.end_time!=null)return [];const key=`${device}:${s.id}`;if(!this.windows.has(key)){const last=this.meta('engine',device,{})?.last;if(!Number.isFinite(last))return [];const points=this.readings(device,Math.max(s.start_time,last-3600),last).flatMap(x=>x.ports.filter(p=>p.port===s.port&&p.pid===s.id).map(p=>({timestamp:x.timestamp,voltage:p.voltage,current:p.current,power:p.power,protocol:p.protocol})));this.windows.set(key,points);}return this.windows.get(key);}return this.readings(device,s.start_time,s.end_time??Infinity).flatMap(x=>x.ports.filter(p=>p.port===s.port&&p.sid===s.id).map(p=>({timestamp:x.timestamp,voltage:p.voltage,current:p.current,power:p.power,protocol:p.protocol})));}
+ *iterateReadings(device='default',start=0,end=Infinity){
+  const rows=this.exec('SELECT data FROM history_minutes WHERE device=? AND minute>=? AND minute<=? ORDER BY minute',device,Math.floor(start/60),Number.isFinite(end)?Math.floor(end/60):Number.MAX_SAFE_INTEGER);
+  for(const row of rows)for(const sample of unpack(row.data))if(sample.timestamp>=start&&sample.timestamp<=end)yield sample;
+ }
+ readings(device='default',start=0,end=Infinity){return Array.from(this.iterateReadings(device,start,end));}
+ points(s,device='default'){if(s.permanent){if(s.end_time!=null)return [];const key=`${device}:${s.id}`;if(!this.windows.has(key)){const last=this.meta('engine',device,{})?.last;if(!Number.isFinite(last))return [];const points=this.readings(device,Math.max(s.start_time,last-3600),last).flatMap(x=>x.ports.filter(p=>p.port===s.port&&p.pid===s.id).map(p=>({timestamp:x.timestamp,voltage:p.voltage,current:p.current,power:p.power,protocol:p.protocol})));this.windows.set(key,points);}return this.windows.get(key);}return Array.from(this.iterateSessionPoints(s,device));}
+ *iterateSessionPoints(s,device){
+  if(s.permanent)return;
+  for(const sample of this.iterateReadings(device,s.start_time,s.end_time??Infinity)){
+   const port=sample.ports.find(p=>p.port===s.port&&p.sid===s.id);
+   if(port)yield {timestamp:sample.timestamp,voltage:port.voltage,current:port.current,power:port.power,protocol:port.protocol};
+  }
+ }
  ingestTelemetry(snapshot){return this.ingestBatch([{...snapshot,timestamp:snapshot.timestamp??this.now()}],snapshot.device||'default');}
  ingestBatch(input,device='default'){
  const samples=Array.isArray(input)?input:input.samples;if(!Array.isArray(samples)||samples.length>3600)throw new Error('Invalid history batch');
@@ -45,14 +56,73 @@ export class HistoryStore {
  for(const s of dirty.values())if(!s.end_time)this.save(s,device);
  for(const [minute,data]of buckets)this.exec('INSERT INTO history_minutes(device,minute,data) VALUES(?,?,?) ON CONFLICT(device,minute) DO UPDATE SET data=excluded.data',device,minute,pack(data));for(const s of ended){if(s.total_wh<.05){this.exec('DELETE FROM history_sessions WHERE device=? AND id=?',device,s.id);continue;}this.finalize(s,device);this.learn(s,device);}this.setMeta('engine',state,device);this.exec('DELETE FROM history_minutes WHERE device=? AND minute<?',device,Math.floor((this.now()-this.retentionDays*86400)/60));return {accepted};
  }
- finalize(s,device){const pts=this.points(s,device);if(pts.length){let seconds=0,v=0,i=0;for(let n=1;n<pts.length;n++){const dt=pts[n].timestamp-pts[n-1].timestamp;if(dt<=0||dt>1800)continue;seconds+=dt;v+=dt*(pts[n].voltage+pts[n-1].voltage)/2;i+=dt*(pts[n].current+pts[n-1].current)/2;}s.avg_voltage=round(seconds?v/seconds:pts.reduce((a,p)=>a+p.voltage,0)/pts.length);s.avg_current=round(seconds?i/seconds:pts.reduce((a,p)=>a+p.current,0)/pts.length);const loaded=pts.filter(p=>p.power>.5);s.min_power_w=loaded.length?round(Math.min(...loaded.map(p=>p.power))):0;s.max_voltage=round(Math.max(...pts.map(p=>p.voltage)));const counts={};for(const p of pts){const name=p.protocol.trim();if(name&&!['idle','5v'].includes(name.toLowerCase()))counts[name]=(counts[name]||0)+1;}s.protocols=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]||a.localeCompare(b)).join(',');}s.total_wh=round(s.total_wh,4);s.avg_power_w=round(s.avg_power_w);s.peak_power_w=round(s.peak_power_w);this.save(s,device);if(s.device_name){const labels=this.meta('labels','shared',{}),sig=signature(s);if(labels[sig]?.name!==s.device_name){labels[sig]={name:s.device_name,cls:'',sample_session_id:s.id,updated_at:this.now()};this.setMeta('labels',labels,'shared');}}}
+ finalize(s,device){
+  let count=0,seconds=0,sumVoltage=0,sumCurrent=0,weightedVoltage=0,weightedCurrent=0,maxVoltage=0,minPower=Infinity,previous=null;
+  const protocols=Object.create(null);
+  for(const point of this.iterateSessionPoints(s,device)){
+   if(previous){
+    const duration=point.timestamp-previous.timestamp;
+    if(duration>0&&duration<=1800){
+     seconds+=duration;
+     weightedVoltage+=duration*(point.voltage+previous.voltage)/2;
+     weightedCurrent+=duration*(point.current+previous.current)/2;
+    }
+   }
+   count++;
+   sumVoltage+=point.voltage;
+   sumCurrent+=point.current;
+   maxVoltage=Math.max(maxVoltage,point.voltage);
+   if(point.power>.5)minPower=Math.min(minPower,point.power);
+   const protocol=point.protocol.trim();
+   if(protocol&&!['idle','5v'].includes(protocol.toLowerCase()))protocols[protocol]=(protocols[protocol]||0)+1;
+   previous=point;
+  }
+  if(count){
+   s.avg_voltage=round(seconds?weightedVoltage/seconds:sumVoltage/count);
+   s.avg_current=round(seconds?weightedCurrent/seconds:sumCurrent/count);
+   s.min_power_w=Number.isFinite(minPower)?round(minPower):0;
+   s.max_voltage=round(maxVoltage);
+   s.protocols=Object.keys(protocols).sort((a,b)=>protocols[b]-protocols[a]||a.localeCompare(b)).join(',');
+  }
+  s.total_wh=round(s.total_wh,4);s.avg_power_w=round(s.avg_power_w);s.peak_power_w=round(s.peak_power_w);
+  this.save(s,device);
+  if(s.device_name){
+   const labels=this.meta('labels','shared',{}),sig=signature(s);
+   if(labels[sig]?.name!==s.device_name){
+    labels[sig]={name:s.device_name,cls:'',sample_session_id:s.id,updated_at:this.now()};
+    this.setMeta('labels',labels,'shared');
+   }
+  }
+ }
  setRecording(enabled,device='default'){const was=this.meta('recording',device,true);this.setMeta('recording',enabled,device);if(!enabled||was)return;const state=this.meta('engine',device,{}),t=this.now();for(let port=1;port<=4;port++){const ps=state[port];if(!ps?.placeholder||!ps.latest?.enabled||!ps.latest.active||ps.latest.current<=0)continue;const p=ps.latest,permanent=this.meta('permanent_ports',device,[]).includes(PORTS[port-1]);const s=this.save({port,start_time:t,end_time:null,total_wh:0,peak_power_w:0,avg_voltage:0,avg_current:0,duration_sec:0,protocol:p.protocol,protocols:p.protocol,permanent,device_name:'',n:0,sum_v:0,sum_i:0,max_voltage:0,min_power_w:0,counts:{},is_active:true},device);ps.sid=s.id;ps.placeholder=false;ps.last=t;ps.power=p.power;ps.integrationPower=p.voltage*p.current;ps.pending=[];}this.setMeta('engine',state,device);}
  pin(s,device='default'){const out=this.decorate(s);if(!s.end_time&&!s.device_name&&out.device.source==='labeled'&&out.device.name){s.device_name=out.device.name;this.save(s,device);out.device_name=s.device_name;}return out;}
  decorate(s){const sig=signature(s),labels=this.meta('labels','shared',{}),profile=this.meta('profiles','shared',{})[sig];let label=labels[sig],matched=null;const p=s.peak_power_w||0,v=s.max_voltage||s.avg_voltage||0,protos=(s.protocols||s.protocol||'').toUpperCase(),has=x=>protos.includes(x);let cls='unknown',brand='unknown',confidence=.2;if(p>=45&&v>=15){cls='laptop';confidence=.75;}else if(p>=30&&v>=15){cls=p<=35?'tablet':'laptop';brand=p<=35?'apple':'unknown';confidence=p<=35?.55:.5;}else if(has('SCP')){cls='phone';brand='huawei';confidence=.7;}else if(has('UFCS')){cls='phone';brand='generic_cn';confidence=.55;}else if(v>=15&&p>=20){cls='laptop';confidence=.5;}else if(v>=15&&p>=12){cls='tablet';confidence=.45;}else if(has('PPS')&&p>=15&&p<=45){cls='phone';brand='samsung';confidence=.45;}else if(p>=18&&v>=8&&v<=12){cls='phone';brand='apple';confidence=.4;}else if(p<7){cls='small';confidence=.65;}else if(p<18&&v<=5.6){cls='powerbank';confidence=.45;}else if(p>=7){cls='phone';confidence=.35;}
  if(!label&&p>=8){const [proto,pow,volt]=sig.split('|');let best=Infinity;for(const [key,l]of Object.entries(labels)){const [lp,lw,lv]=key.split('|'),dist=Math.abs(Number(lw)-Number(pow));if(l.name&&proto===lp&&volt===lv&&dist<=5){if(dist<best){best=dist;label=l;matched=key;}else if(dist===best){label=null;matched=null;}}}}
  const names={laptop:'笔记本',tablet:'平板',phone:'手机',small:'耳机/手表',powerbank:'充电宝/配件',unknown:'未知设备'},brands={huawei:'华为/荣耀系',apple:'苹果系',samsung:'三星/Pixel 系',generic_cn:'国产快充机型',unknown:''};const named=s.device_name||label?.name;cls=label?.cls||cls;return {...s,device:{signature:sig,name:named||'',cls,cls_label:names[cls]||cls,brand,brand_label:brands[brand],confidence:s.device_name?1:label?(matched?.7:1):confidence,source:named?'labeled':'guessed',hint:cls==='laptop'&&s.avg_voltage>=19?'20V 恒压档，典型笔记本供电':cls==='small'?'小电流慢充，多为耳机/手表/键鼠':'',...(label?{exact:!matched,...(matched?{matched_signature:matched}:{})}:{})},...(s.cap_wh?{}:profile?.cap_wh?{cap_wh:profile.cap_wh,cap_from_profile:true}:{})};}
 
- learn(s,device){if(!s.end_time||s.start_pct==null||s.start_pct<5||s.start_pct>=100||!(s.cap_wh>0))return false;const prof=this.meta('profiles','shared',{})[signature(s)],key=(prof?.model?(prof.brand&&!prof.model.includes(prof.brand)?prof.brand+' '+prof.model:prof.model):'')||s.device_name;if(!key)return false;const acc={},bands=[0,50,70,75,80,90,95,100],pts=this.points(s,device);if(pts.length<3)return false;const peak=s.peak_power_w>=3?s.peak_power_w:Math.max(...pts.map(p=>p.power));if(peak<3)return false;let cum=0;for(let i=1;i<pts.length;i++){const dt=pts[i].timestamp-pts[i-1].timestamp;if(dt<=0||dt>120)continue;const e=(pts[i].power+pts[i-1].power)*dt/7200;if(e<=0)continue;const mid=s.start_pct+(cum+e/2-(s.pct_wh||0))*.88/s.cap_wh*100;cum+=e;const lo=bands.find((b,j)=>j<bands.length-1&&mid>=b&&mid<bands[j+1]);if(lo!==undefined){acc[lo]??=[0,0];acc[lo][0]+=e;acc[lo][1]+=dt;}}
+ learn(s,device){
+  if(!s.end_time||s.start_pct==null||s.start_pct<5||s.start_pct>=100||!(s.cap_wh>0))return false;
+  const prof=this.meta('profiles','shared',{})[signature(s)],key=(prof?.model?(prof.brand&&!prof.model.includes(prof.brand)?prof.brand+' '+prof.model:prof.model):'')||s.device_name;
+  if(!key)return false;
+  const acc={},bands=[0,50,70,75,80,90,95,100];
+  let count=0,cum=0,measuredPeak=0,previous=null;
+  for(const point of this.iterateSessionPoints(s,device)){
+   const before=previous;
+   previous=point;
+   count++;
+   measuredPeak=Math.max(measuredPeak,point.power);
+   if(!before)continue;
+   const dt=point.timestamp-before.timestamp;
+   if(dt<=0||dt>120)continue;
+   const e=(point.power+before.power)*dt/7200;
+   if(e<=0)continue;
+   const mid=s.start_pct+(cum+e/2-(s.pct_wh||0))*.88/s.cap_wh*100;
+   cum+=e;
+   const lo=bands.find((b,j)=>j<bands.length-1&&mid>=b&&mid<bands[j+1]);
+   if(lo!==undefined){acc[lo]??=[0,0];acc[lo][0]+=e;acc[lo][1]+=dt;}
+  }
+  const peak=s.peak_power_w>=3?s.peak_power_w:measuredPeak;
+  if(count<3||peak<3)return false;
  const curves=this.meta('curves','shared',{}),old=curves[key]||{curve:[],n:0},map=Object.fromEntries(old.curve);let learned=false;for(const [lo,[wh,sec]]of Object.entries(acc))if(sec>=60){const ratio=Math.min(1.2,Math.max(.03,wh/sec*3600/peak));map[lo]=round(map[lo]===undefined?ratio:(map[lo]*old.n+ratio)/(old.n+1),3);learned=true;}if(!learned)return false;curves[key]={curve:Object.entries(map).map(([a,b])=>[Number(a),b]).sort((a,b)=>a[0]-b[0]),n:old.n+1,peak_w:round(peak,1),updated_at:this.now()};this.setMeta('curves',Object.fromEntries(Object.entries(curves).sort((a,b)=>b[1].updated_at-a[1].updated_at).slice(0,50)),'shared');return true;
  }
  handle(request,device='default'){return handleHistoryRequest(this,request,device);}

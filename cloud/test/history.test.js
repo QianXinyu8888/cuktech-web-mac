@@ -5,6 +5,35 @@ const base=1794000000;
 function setup(){const db=new DatabaseSync(':memory:');const sql={exec(q,...args){const stmt=db.prepare(q);return stmt.columns().length?stmt.all(...args):(stmt.run(...args),[]);}};let time=base+1000;const store=new HistoryStore(sql,{now:()=>time});return {store,db,setTime:t=>time=t};}
 const sample=(t,power=10)=>({timestamp:base+t,ports:['c1','c2','c3','a'].map((id,i)=>({id,voltage:i?0:5,current:i?0:power/5,active:!i,valid:true,protocol:i?'idle':'PD'}))});
 const req=async(s,path,body,device)=>{const r=await s.handle(new Request('https://local'+path,body?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}:{}),device);return {status:r.status,body:await r.json()};};
+test('chart total uses unrounded port averages',async()=>{
+ const {store,setTime}=setup();
+ const reading=sample(1);
+ for(const port of reading.ports)port.power=0.04;
+ store.ingestBatch([reading]);
+ setTime(base+60);
+ const {body}=await req(store,'/api/chart?hours=1&interval=60');
+ assert.deepEqual(body.datasets.power.map(port=>port.data.at(-1)),[0,0,0,0,0.2]);
+});
+test('closing a long charge records its statistics without rejecting the upload',()=>{
+ const {store,db,setTime}=setup();
+ store.ingestBatch(Array.from({length:31},(_,second)=>sample(second)));
+ const {id}=store.sessions()[0];
+ const minuteCount=2500;
+ const insert=db.prepare('INSERT INTO history_minutes(device,minute,data) VALUES(?,?,?)');
+ for(let minute=1;minute<=minuteCount;minute++){
+  const bucket=base/60+minute;
+  const readings=Array.from({length:60},(_,second)=>[bucket*60+second,[[1,5,1.6,'PD',3,id,8]]]);
+  insert.run('default',bucket,JSON.stringify(readings));
+ }
+ const end=sample((minuteCount+1)*60);
+ end.ports[0].enabled=false;
+ setTime(end.timestamp);
+ assert.deepEqual(store.ingestBatch([end]),{accepted:1});
+ const closed=store.get(id);
+ assert.equal(closed.end_time,end.timestamp);
+ assert.equal(closed.min_power_w,8);
+ assert.equal(closed.max_voltage,5);
+});
 test('trapezoid integration skips gaps, duplicates and rollback',()=>{const pts=[{timestamp:0,voltage:5,current:2},{timestamp:10,voltage:10,current:2},{timestamp:50,voltage:20,current:2}];assert.equal(integrate(pts),150/3600);assert.equal(integrate([pts[0],pts[0]]),0);});
 test('start gate and full detector use elapsed seconds and sustained recovery',()=>{const g=new SessionStartGate();assert.equal(g.shouldStart(0,10,5),false);assert.equal(g.shouldStart(29,10,5),false);assert.equal(g.shouldStart(30,10,5),true);assert.equal(g.lastRunStart,0);g.noteEnd(10);assert.equal(g.shouldStart(1000,1,5),false);g.noLoad();assert.equal(g.shouldStart(1001,1,5),false);assert.equal(g.shouldStart(1031,1,5),true);const d=new ChargeSessionDetector();let ended=false;for(let t=0;t<1000;t++){d.feed(t,5,t<200?2:0);ended||=d.shouldEnd(t,1,0);}assert.equal(ended,true);});
 test('minute packing preserves seconds and session backfill, deduplicates retransmits and survives reload',async()=>{const {store:s,db}=setup();const points=Array.from({length:71},(_,i)=>sample(i));assert.equal(s.ingestBatch(points).accepted,71);assert.equal(s.ingestBatch(points).accepted,0);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM history_minutes').get().n,2);const session=s.sessions()[0];assert.equal(session.start_time,base);assert.ok(Math.abs(session.total_wh-700/3600)<1e-10);assert.equal(s.points(session).length,71);const r=await req(s,'/api/sessions?period=all');assert.equal(r.body.sessions.length,1);assert.equal(r.body.sessions[0].is_active,true);assert.equal((await req(s,`/api/sessions/${session.id}/points`,null,'other')).status,404);});

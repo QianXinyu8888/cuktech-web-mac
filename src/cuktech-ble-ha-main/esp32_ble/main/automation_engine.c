@@ -76,6 +76,7 @@ void auto_engine_feed(AutoEngine *e,unsigned index,uint32_t t,bool valid,float v
  float fast=median(e,p,t>20?t-20:0),slow=median(e,p,t>180?t-180:0);
  if(fast>p->peak)p->peak=fast;
  if(p->charging) {
+  p->session_duration=t-p->session_start;
   if(known&&!enabled){close_session(p);return;}
   if(!active||a<=0) {
    if(p->no_load_since==AUTO_NONE)p->no_load_since=t;
@@ -109,7 +110,7 @@ void auto_engine_feed(AutoEngine *e,unsigned index,uint32_t t,bool valid,float v
  if(!active||(known&&!enabled)||fast<start){p->above_since=AUTO_NONE;return;}
  if(p->above_since==AUTO_NONE)p->above_since=t;
  if(t-p->above_since<30)return;
- p->charging=true;p->session_start=p->above_since;p->session_wh=0;p->post_session=false;p->peak=fast;
+ p->charging=true;p->session_start=p->above_since;p->session_duration=t-p->session_start;p->session_wh=0;p->post_session=false;p->peak=fast;
  p->pending=p->inflight=p->fired=false;p->attempts=p->reason=0;p->error[0]=0;
  AutoPoint previous={0};bool have=false;
  for(unsigned i=0;i<p->count;++i) {

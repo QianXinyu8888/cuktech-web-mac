@@ -10,7 +10,9 @@ function periodWindow(period,now){const midnight=Math.floor((now+8*3600)/86400)*
 function energy(sessions,period){const positive=sessions.filter(s=>s.total_wh>0),wh=positive.reduce((a,s)=>a+s.total_wh,0),dur=positive.reduce((a,s)=>a+s.duration_sec,0),by_port={};for(const s of positive){by_port[s.port]??={wh:0,count:0};by_port[s.port].wh+=s.total_wh;by_port[s.port].count++;if(s.is_active)by_port[s.port].is_active=true;}for(const p of Object.values(by_port))p.wh=round(p.wh);return {period,total_wh:round(wh),session_count:positive.length,avg_power_w:dur?round(wh*3600/dur,1):0,peak_power_w:round(Math.max(0,...positive.map(s=>s.peak_power_w)),1),total_duration_sec:dur,by_port};}
 export async function handleHistoryRequest(store,request,device){
  try{
- const u=new URL(request.url),q=u.searchParams,path=u.pathname,method=request.method,period=q.get('period')||'today';const [start,end]=periodWindow(period,store.now());const all=store.sessions(device).map(s=>store.pin(s,device)).sort((a,b)=>Number(!b.end_time)-Number(!a.end_time)||b.start_time-a.start_time);const periodRows=all.filter(s=>s.start_time>=start&&s.start_time<end&&(s.total_wh>0||!s.end_time));const port=PORTS.indexOf(q.get('port'))+1,names=(q.get('device_label')||'').split(',').map(n=>n.trim()).filter(Boolean);const filtered=periodRows.filter(s=>(!port||s.port===port)&&(!names.length||names.includes(s.device_name)||names.includes(s.device?.name)));
+ const u=new URL(request.url),q=u.searchParams,path=u.pathname,method=request.method,period=q.get('period')||'today';
+ if(path==='/api/chart')return await chart(store,request,device,q);
+ const [start,end]=periodWindow(period,store.now());const all=store.sessions(device).map(s=>store.pin(s,device)).sort((a,b)=>Number(!b.end_time)-Number(!a.end_time)||b.start_time-a.start_time);const periodRows=all.filter(s=>s.start_time>=start&&s.start_time<end&&(s.total_wh>0||!s.end_time));const port=PORTS.indexOf(q.get('port'))+1,names=(q.get('device_label')||'').split(',').map(n=>n.trim()).filter(Boolean);const filtered=periodRows.filter(s=>(!port||s.port===port)&&(!names.length||names.includes(s.device_name)||names.includes(s.device?.name)));
  if(path==='/api/sessions'){const limit=Math.max(1,Math.min(50,Number(q.get('limit')||10))),page=Math.max(1,Number(q.get('page')||1));if(!Number.isInteger(limit)||!Number.isInteger(page))throw Error('invalid pagination');return json({sessions:filtered.slice((page-1)*limit,page*limit).map(s=>sessionView(store,{...s,_device:device},filtered.length)),total:filtered.length,page,limit,pages:Math.max(1,Math.ceil(filtered.length/limit))});}
  if(path==='/api/session-filters')return json({ok:true,ports:[...new Set(periodRows.map(s=>s.port))].sort(),devices:[...new Set(periodRows.map(s=>s.device_name||s.device?.name).filter(Boolean))].sort()});
  if(path==='/api/energy/stats')return json(energy(filtered,period));
@@ -31,9 +33,44 @@ export async function handleHistoryRequest(store,request,device){
  if(path==='/api/port-modes'&&method==='GET')return json({ok:true,permanent_ports:store.meta('permanent_ports',device,[]),full_off_ports:store.meta('full_off_ports',device,{})});
  if(path==='/api/charge-limits'&&method==='GET')return json({ok:true,limits:store.meta('charge_limits',device,{})});
  const pm=path.match(/^\/api\/(statistics|export|history)\/([1-4])$/);if(pm){const hours=Number(q.get('hours')||24);if(!Number.isFinite(hours)||hours<=0)throw Error('invalid hours');const points=store.readings(device,store.now()-Math.min(hours,720)*3600).flatMap(s=>s.ports.filter(p=>p.port===Number(pm[2])&&p.valid).map(p=>({timestamp:s.timestamp,...p})));if(pm[1]==='export')return csv([['timestamp','datetime','voltage','current','power','active','protocol'],...points.map(p=>[pyfloat(p.timestamp),localDate(p.timestamp).replace('T',' '),pyfloat(p.voltage),pyfloat(p.current),pyfloat(p.power),p.active?'yes':'no',p.protocol])],`port_${pm[2]}_history.csv`);if(pm[1]==='history')return json({ok:true,data:points});const mean=k=>points.length?points.reduce((a,p)=>a+p[k],0)/points.length:0;const stats={port:Number(pm[2]),hours:Math.min(hours,720),samples:points.length};if(points.length){const min=k=>Math.min(...points.map(p=>p[k])),max=k=>Math.max(...points.map(p=>p[k]));Object.assign(stats,{first_seen:localDate(points[0].timestamp),last_seen:localDate(points.at(-1).timestamp),voltage:{avg:round(mean('voltage')),min:round(min('voltage')),max:round(max('voltage'))},current:{avg:round(mean('current')),max:round(max('current'))},power:{avg:round(mean('power')),max:round(max('power')),total_wh:round(points.filter(p=>p.active).reduce((a,p,i,active)=>i?a+p.power*Math.min(p.timestamp-active[i-1].timestamp,30)/3600:a,0))},active_ratio:round(points.filter(p=>p.active).length/points.length)});}return json({ok:true,data:stats});}
- if(path==='/api/chart'){const hours=Number(q.get('hours')||1),iv=Number(q.get('interval')||30);if(!Number.isFinite(hours)||hours<=0||!Number.isInteger(iv))throw Error('invalid chart parameters');const interval=Math.max(5,iv,hours>168?1800:hours>72?600:hours>24?300:5),from=Math.floor((store.now()-Math.min(720,hours)*3600)/interval)*interval,to=Math.floor(store.now()/interval)*interval;const bins=new Map();for(const s of store.readings(device,from,to))for(const p of s.ports.filter(p=>p.valid)){const key=`${Math.floor(s.timestamp/interval)*interval}:${p.port}`;const b=bins.get(key)||{n:0,power:0,voltage:0,current:0};b.n++;for(const k of ['power','voltage','current'])b[k]+=p[k];bins.set(key,b);}const epochs=[];for(let t=from;t<to;t+=interval)epochs.push(t);const datasets={};for(const k of ['power','voltage','current'])datasets[k]=PORTS.map((p,i)=>({label:p.toUpperCase(),data:epochs.map(t=>{const b=bins.get(`${t}:${i+1}`);return b?round(b[k]/b.n,k==='power'?1:2):0;})}));datasets.power.push({label:'Total',data:epochs.map((_,i)=>round(datasets.power.reduce((a,p)=>a+p.data[i],0),1))});const body={ok:true,labels:epochs.map(t=>new Date((t+28800)*1000).toISOString().slice(hours>12?5:11,16).replace('T',' ')),datasets};const text=JSON.stringify(body),digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)),etag=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');if(request.headers.get('if-none-match')===etag)return new Response(null,{status:304,headers:{ETag:etag}});return new Response(text,{headers:{'content-type':'application/json',ETag:etag}});}
  return null;
  }catch(e){return json({ok:false,error:e.message},400);}
 }
+async function chart(store,request,device,query){
+ const hours=Number(query.get('hours')||1), requestedInterval=Number(query.get('interval')||30);
+ if(!Number.isFinite(hours)||hours<=0||!Number.isInteger(requestedInterval))throw Error('invalid chart parameters');
+ const interval=Math.max(5,requestedInterval,hours>168?1800:hours>72?600:hours>24?300:5);
+ const now=store.now();
+ const from=Math.floor((now-Math.min(720,hours)*3600)/interval)*interval;
+ const to=Math.floor(now/interval)*interval;
+ const metrics=['power','voltage','current'],bins=new Map();
+ for(const sample of store.iterateReadings(device,from,to)){
+  if(sample.timestamp>=to)break;
+  const epoch=Math.floor(sample.timestamp/interval)*interval;
+  for(const port of sample.ports){
+   if(!port.valid)continue;
+   const key=`${epoch}:${port.port}`;
+   const bucket=bins.get(key)??{n:0,power:0,voltage:0,current:0};
+   bucket.n++;
+   for(const metric of metrics)bucket[metric]+=port[metric];
+   bins.set(key,bucket);
+  }
+ }
+ const epochs=[];
+ for(let epoch=from;epoch<to;epoch+=interval)epochs.push(epoch);
+ const averages=(metric,epoch,port)=>{const bucket=bins.get(`${epoch}:${port}`);return bucket?bucket[metric]/bucket.n:0;};
+ const datasets=Object.fromEntries(metrics.map(metric=>[metric,PORTS.map((port,i)=>({
+  label:port.toUpperCase(),data:epochs.map(epoch=>round(averages(metric,epoch,i+1),metric==='power'?1:2))
+ }))]));
+ datasets.power.push({label:'Total',data:epochs.map(epoch=>round(PORTS.reduce((sum,_,i)=>sum+averages('power',epoch,i+1),0),1))});
+ const labels=epochs.map(epoch=>localDate(epoch).slice(hours>12?5:11,16).replace('T',' '));
+ const text=JSON.stringify({ok:true,labels,datasets});
+ const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));
+ const etag='"'+Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')+'"';
+ const headers={ETag:etag,'Cache-Control':'private, no-cache'};
+ if(request.headers.get('if-none-match')===etag)return new Response(null,{status:304,headers});
+ return new Response(text,{headers:{...headers,'content-type':'application/json'}});
+}
+
 // Largest Triangle Three Buckets: retain curve shape and endpoints without changing exports.
 export function downsample(data,threshold){if(threshold>=data.length)return data;if(threshold<3)return threshold===1?[data[0]]:[data[0],data.at(-1)];const out=[data[0]],every=(data.length-2)/(threshold-2);let a=0;for(let i=0;i<threshold-2;i++){let avgX=0,avgY=0;const as=Math.floor((i+1)*every)+1,ae=Math.min(Math.floor((i+2)*every)+1,data.length);for(let j=as;j<ae;j++){avgX+=data[j].timestamp;avgY+=data[j].power;}avgX/=(ae-as)||1;avgY/=(ae-as)||1;let area=-1,next=Math.floor(i*every)+1;for(let j=next;j<Math.min(Math.floor((i+1)*every)+1,data.length-1);j++){const v=Math.abs((data[a].timestamp-avgX)*(data[j].power-data[a].power)-(data[a].timestamp-data[j].timestamp)*(avgY-data[a].power));if(v>area){area=v;next=j;}}out.push(data[next]);a=next;}out.push(data.at(-1));return out;}

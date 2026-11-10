@@ -109,14 +109,13 @@ static void _init_settings_defaults(void) {
 #define PIID21_ALL_ON  0x03030F0F
 static uint32_t protocol_extend_val = PIID21_ALL_ON;
 static bool protocol_extend_valid = true;
-static uint32_t port_ctrl_val = 0xFF;  // assume all ports on (can't GET to read actual)
+static uint32_t port_ctrl_val = 0xFF;  // legacy local fallback until a hardware mask is available
 static bool cloud_result_waiting = false;
-static bool port_ctrl_confirmed = false; // only actual remote SET16 result establishes enabled state
+static bool port_ctrl_confirmed = false; // a valid GET16 or remote SET16 result establishes enabled state
 static bool port_ctrl_valid = true;    // track SET updates
 static bool ble_enabled = true;        // BLE connection enable/disable switch
 static bool ble_ready_flag = false;
 static int mqtt_restart_count = 0;     // MQTT reconnect failure counter (shared with event handler)
-static uint64_t last_set16_time = 0;
 static uint64_t last_set_time = 0;   // any SET command (used for push/GET debounce during transitions)
 static uint8_t last_set_piid = 0;    // piid of last SET — distinguish port control from protocol change
 static bool mqtt_connected = false;  // MQTT connection state (check before publish to avoid outbox overflow)
@@ -679,10 +678,8 @@ static void ble_task(void *pvParameters) {
     BleResult res;
     bool was_ready = false;
     BleCommand cloud_ble_pending={0};
-    // NOTE: Device does NOT support MiOT GET commands.
-    // Port data comes via push notifications only.
-    // Settings can only be changed via SET, not read via GET.
-    // Internal poll is disabled to prevent pending table overflow.
+    // Port telemetry comes via push notifications. Some charger firmware
+    // versions may reject settings reads, so cloud-mode polling cannot block control.
 
     while (1) {
         // Drain urgent queue (CMD_PORT from MQTT) and cmd_queue (rare external GETs).
@@ -693,7 +690,7 @@ static void ble_task(void *pvParameters) {
         do {
             cmd.type = CMD_NOP;
             LOCK_STATE(); bool awaiting_result=cloud_result_waiting; UNLOCK_STATE();
-            if (awaiting_result || ble_manager_has_cloud_pending()) break;
+            if (awaiting_result || ble_manager_pending_count()) break;
             if (urgent_queue && xQueueReceive(urgent_queue, &cmd, 0) == pdTRUE) {
                 did_work = true;
             } else if (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
@@ -741,12 +738,18 @@ static void ble_task(void *pvParameters) {
                 }
                 switch (cmd.type) {
                 case CMD_GET: {
+                    if (g_cfg.cloud_enabled) {
+                        if (ble_manager_is_ready()) ble_manager_send_get_async(cmd.piid,cmd.poll_seq);
+                        break;
+                    }
                     uint32_t val = 0;
                     bool ok = ble_manager_miot_get(cmd.piid, &val);
                     if (ok) {
                         LOCK_STATE();
                         if (cmd.piid < 32) { settings[cmd.piid] = val; settings_valid[cmd.piid] = true; }
-                        if (cmd.piid == 16) { port_ctrl_val = val; port_ctrl_valid = true; }
+                        if (cmd.piid == 16 && cloud_setting_valid(16,val)) {
+                            port_ctrl_val = val; port_ctrl_valid = true; port_ctrl_confirmed = true;
+                        }
                         if (cmd.piid == 21) { protocol_extend_val = val; ble_manager_store_setting(21, val); }
                         UNLOCK_STATE();
                         publish_settings();
@@ -797,7 +800,6 @@ static void ble_task(void *pvParameters) {
                     }
                     res = (BleResult){.type=RES_SET, .success=true, .piid=16, .value=current, .poll_seq=0};
                     xQueueSend(result_queue, &res, 0);
-                    last_set16_time = esp_timer_get_time() / 1000;
                     break;
                 }
                 case CMD_RECONNECT:
@@ -981,6 +983,7 @@ static void app_task(void* pvParameters) {
                 break;
             }
             case RES_GET: {
+                if (!res.success) break;
                 LOCK_STATE();
                 if (res.piid >= 1 && res.piid <= 4) {
                     int idx = res.piid - 1;
@@ -1026,41 +1029,45 @@ static void app_task(void* pvParameters) {
                     UNLOCK_STATE();
                     if (publish) publish_port(idx);
                 } else {
-                    // Settings: update and publish (only on success)
-                    if (res.success) {
-                        if (res.piid == 16) {
-                            // Ignore stale GET(16)=0 for 3s after a SET
-                            if (res.value == 0 && port_ctrl_val != 0 &&
-                                (esp_timer_get_time() / 1000 - last_set16_time) < 3000) {
-                                // stale — keep previous value
-                            } else {
-                                settings[16] = res.value;
-                                port_ctrl_val = res.value;
-                                port_ctrl_valid = true;
-                            }
-                            if (!settings_valid[16]) settings_valid[16] = true;
-                        } else if (res.piid < 32) {
-                            settings[res.piid] = res.value;
-                            settings_valid[res.piid] = true;
+                    if (res.piid == 16) {
+                        if (cloud_setting_valid(16,res.value)) {
+                            settings[16] = res.value;
+                            settings_valid[16] = true;
+                            port_ctrl_val = res.value;
+                            port_ctrl_valid = true;
+                            port_ctrl_confirmed = ble_ready_flag;
                         }
-                        if (res.piid == 21) { protocol_extend_val = res.value; ble_manager_store_setting(21, res.value); }
-                    }
-                    UNLOCK_STATE();
-                    if (res.success) publish_settings();
-                }
-                break;
-            }
-            case RES_SET: {
-                LOCK_STATE();
-                if (res.success) {
-                    if (res.piid == 16) { port_ctrl_val = res.value; port_ctrl_valid = true; port_ctrl_confirmed = res.cloud_id[0] != 0; }
-                    else if (res.piid < 32) {
+                    } else if (res.piid < 32) {
                         settings[res.piid] = res.value;
                         settings_valid[res.piid] = true;
                     }
                     if (res.piid == 21) protocol_extend_val = res.value;
+                    if (res.piid == 17 || res.piid == 18 || res.piid == 21)
+                        ble_manager_store_setting(res.piid,res.value);
+                    UNLOCK_STATE();
+                    publish_settings();
+                }
+                break;
+            }
+            case RES_SET: {
+                bool cloud_mask = res.piid == 16 && res.cloud_id[0];
+                LOCK_STATE();
+                if (cloud_mask) {
+                    port_ctrl_confirmed = ble_ready_flag && (res.success || res.value_confirmed) && cloud_setting_valid(16,res.value);
+                    if (port_ctrl_confirmed) { port_ctrl_val = res.value; port_ctrl_valid = true; }
+                } else if (res.success || res.value_confirmed) {
+                    if (res.piid == 16) { port_ctrl_val = res.value; port_ctrl_valid = true; port_ctrl_confirmed = false; }
+                    else if (res.piid < 32) {
+                        settings[res.piid] = res.value;
+                        settings_valid[res.piid] = true;
+                    }
+                    if (res.piid == 21) { protocol_extend_val = res.value; ble_manager_store_setting(21,res.value); }
                 }
                 UNLOCK_STATE();
+                if (cloud_mask && !res.success) {
+                    BleCommand refresh = {.type=CMD_GET, .piid=16};
+                    xQueueSend(cmd_queue,&refresh,0);
+                }
                 if (res.success) {
                     last_set_time = esp_timer_get_time() / 1000;
                     last_set_piid = res.piid;
@@ -1075,17 +1082,21 @@ static void app_task(void* pvParameters) {
             }
             case RES_BLE_STATUS: {
                 LOCK_STATE();
+                bool became_ready = !ble_ready_flag && res.value != 0;
                 ble_ready_flag = res.value != 0;
-                if (!ble_ready_flag) port_ctrl_confirmed = false;
+                if (!ble_ready_flag) {
+                    port_ctrl_confirmed = false;
+                    memset(port_sample_time,0,sizeof port_sample_time);
+                }
                 UNLOCK_STATE();
                 publish_status();
                 // Always update Bemfa BLE state regardless of main MQTT
                 bemfa_publish_status(res.value != 0);
-                if (res.value) {
+                if (became_ready) {
                     // Fetch settings on initial BLE connect so frontend shows
                     // actual values instead of hardcoded defaults, and protocol
                     // detection uses real hardware protocol codes (PIID 17/18).
-                    static const uint8_t INIT_PIIDS[] = {5, 6, 15, 21, 17, 18};
+                    static const uint8_t INIT_PIIDS[] = {16, 5, 6, 15, 21, 17, 18};
                     for (int i = 0; i < sizeof(INIT_PIIDS); i++) {
                         BleCommand c = {.type=CMD_GET, .piid=INIT_PIIDS[i], .value=0, .poll_seq=0};
                         xQueueSend(cmd_queue, &c, 0);
@@ -1097,7 +1108,8 @@ static void app_task(void* pvParameters) {
             }
             if (res.cloud_id[0]) { LOCK_STATE(); cloud_result_waiting=false; UNLOCK_STATE(); }
             if (!strncmp(res.cloud_id,"auto:",5)) automation_result((unsigned)(res.cloud_id[5]-'0'),res.success);
-            else if (res.cloud_id[0]) cloud_bridge_complete(res.cloud_id,res.success,res.success ? NULL : "ble_rejected_or_timeout");
+            else if (res.cloud_id[0]) cloud_bridge_complete(res.cloud_id,res.success,
+                res.success ? NULL : (res.value_confirmed ? "ble_value_mismatch" : "ble_rejected_or_timeout"));
         }
 
         // Slow poll (90s): scene mode, screen time, countdown, trickle

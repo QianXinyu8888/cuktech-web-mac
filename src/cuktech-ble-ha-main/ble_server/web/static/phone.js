@@ -108,7 +108,7 @@ function phoneDeviceDefaults() {
         bleConnected: false,
         connected: false,
         authenticated: false,
-        ports: { c1:{v:0,a:0,w:0,protocol:'idle',enabled:true}, c2:{v:0,a:0,w:0,protocol:'idle',enabled:true}, c3:{v:0,a:0,w:0,protocol:'idle',enabled:true}, a:{v:0,a:0,w:0,protocol:'idle',enabled:true} },
+        ports: Object.fromEntries(PORT_KEYS.map(key => [key, {v:0,a:0,w:0,protocol:'idle',enabled:false,enabledKnown:false,valid:false}])),
         settings: {},
         firmware: '',
         trickleEnabled: false,
@@ -1276,6 +1276,7 @@ function initPhoneSSE() {
                         renderPowerDist();
                     }
                     if (msg.settings) applySettingsUpdate(msg.settings);
+                    else renderPortCtl();
                     if (msg.protocol_switches) state.protocolSwitches = msg.protocol_switches;
                     if (msg.protocol_extend !== undefined) state.protocolExtend = msg.protocol_extend;
                     break;

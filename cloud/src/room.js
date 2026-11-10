@@ -3,6 +3,8 @@ import { validateTelemetry, validateControl, validateSettings, validateCommandRe
 const LIVE_INTERVAL_MS = 1000;
 const IDLE_INTERVAL_MS = 30000;
 const STATUS_FRESHNESS_MS = IDLE_INTERVAL_MS + 15000;
+// A device attachment contains up to three separately bounded messages and connection metadata.
+const MAX_ATTACHMENT_BYTES = 8192;
 class DeviceRoom {
  constructor(state,deviceId='default',viewers=null){
   this.deviceId=deviceId;this.state=state;this.viewers=viewers??new Set();this.producer=null;this.latest=null;this.settings=null;this.pending=null;
@@ -70,13 +72,13 @@ class DeviceRoom {
   if(data?.type==='automation_state'){try{validateAutomationState(data);if(this.pending?.action==='automation')this.pending.automationState=data;else this.persistAutomation(data);this.automationFresh=true;this.broadcast(data);}catch{socket.close(1008,'Invalid automation state');this.disconnect(socket);}return;}
   if(data?.type==='history_batch'){try{validateHistoryBatch(data);}catch{socket.close(1008,'Invalid history batch');this.disconnect(socket);return;}const history=this.history,windows=structuredClone(history.windows);try{const result=this.state.storage.transactionSync(()=>history.ingestBatch(data.samples,this.deviceId));this.send(socket,{type:'history_ack',id:data.id,accepted:result.accepted});}catch{history.windows=windows;socket.close(1011,'History storage failed');this.disconnect(socket);}return;}
   if(data?.type==='command_result'){try{validateCommandResult(data);}catch{socket.close(1008,'Invalid result');this.disconnect(socket);return;}const pending=this.pending;if(pending&&data.id===pending.id){if(Date.now()>=pending.expiresAt)this.failPending('Command timed out',504);else this.finishPending(data.ok?{ok:true}:{ok:false,error:data.error||'Device rejected command'},data.ok?200:502);}return;}
-  if(data?.type==='settings'){try{validateSettings(data);const attachment={...a,settings:data};if(new TextEncoder().encode(JSON.stringify(attachment)).length>=2048)throw new Error('Attachment too large');this.settings=data;socket.serializeAttachment(attachment);this.broadcast({type:'settings',...data});this.broadcast({type:'mac-status',data:this.publicStatus()});}catch{socket.close(1008,'Invalid settings');this.disconnect(socket);}return;}
+  if(data?.type==='settings'){try{validateSettings(data);const attachment={...a,settings:data};if(new TextEncoder().encode(JSON.stringify(attachment)).length>=MAX_ATTACHMENT_BYTES)throw new Error('Attachment too large');this.settings=data;socket.serializeAttachment(attachment);this.broadcast({type:'settings',...data});this.broadcast({type:'mac-status',data:this.publicStatus()});}catch{socket.close(1008,'Invalid settings');this.disconnect(socket);}return;}
   try{validateTelemetry(data);}catch{socket.close(1008,'Invalid telemetry');this.disconnect(socket);return;}
   const now=Date.now(), interval=this.viewers.size?LIVE_INTERVAL_MS:IDLE_INTERVAL_MS;
   if(a.lastAcceptedAt!==undefined && now-a.lastAcceptedAt<interval)return;
   this.latest={...data,receivedAt:now};
   const attachment={...a,role:'device',lastAcceptedAt:now,latest:this.latest,...(this.settings?{settings:this.settings}:{}),...(a.automationProgress?{automationProgress:a.automationProgress}:{})};
-  if(new TextEncoder().encode(JSON.stringify(attachment)).length>=2048){socket.close(1008,'Snapshot too large');this.disconnect(socket);return;}
+  if(new TextEncoder().encode(JSON.stringify(attachment)).length>=MAX_ATTACHMENT_BYTES){socket.close(1008,'Snapshot too large');this.disconnect(socket);return;}
   socket.serializeAttachment(attachment);this.broadcast({type:'mac-status',data:this.publicStatus()});this.broadcast(this.latest);
  }
  disconnect(socket){
@@ -88,17 +90,17 @@ class DeviceRoom {
   validateAutomationState(state);
   const config=s=>({chargeLimits:Object.fromEntries(Object.entries(s.chargeLimits).sort(([a],[b])=>a.localeCompare(b)).map(([p,e])=>[p,{wh:e.wh,mode:e.mode}])),permanent:[...s.permanent].sort(),fullOff:Object.fromEntries(Object.entries(s.fullOff).sort(([a],[b])=>a.localeCompare(b)))});
   const attachment=this.producer?{...this.producer.deserializeAttachment(),automationProgress:state}:null;
-  if(attachment&&new TextEncoder().encode(JSON.stringify(attachment)).length>=2048)throw new Error('Automation attachment too large');
+  if(attachment&&new TextEncoder().encode(JSON.stringify(attachment)).length>=MAX_ATTACHMENT_BYTES)throw new Error('Automation attachment too large');
   const previous=this.automationState, nextConfig=config(state);
   if(!previous||JSON.stringify(config(previous))!==JSON.stringify(nextConfig)){
-   const stored={...state,chargeLimits:Object.fromEntries(Object.entries(state.chargeLimits).map(([p,e])=>[p,{...e,sessionWh:0,fired:false,pending:false,error:''}]))};
+   const stored={...state,chargeLimits:Object.fromEntries(Object.entries(state.chargeLimits).map(([p,e])=>[p,{...e,sessionWh:0,fired:false,pending:false,error:'',...(Object.hasOwn(e,'charging')?{charging:false,sessionSec:0,avgPowerW:0}:{})}]))};
    this.state.storage.transactionSync(()=>{this.history.setMeta('automation_state',stored,this.deviceId);this.history.setMeta('charge_limits',nextConfig.chargeLimits,this.deviceId);this.history.setMeta('permanent_ports',nextConfig.permanent,this.deviceId);this.history.setMeta('full_off_ports',nextConfig.fullOff,this.deviceId);});
   }
   this._automationState=state;this.automationReceivedAt=Date.now();
   if(attachment)this.producer.serializeAttachment(attachment);
 
  }
- automationResponse(path){const s=this.automationState,common={ok:true,configured:!!s,gateway_connected:!!this.producer,state_fresh:!!this.producer&&!!this.automationFresh};if(path.endsWith('charge-limits'))return {...common,limits:s?Object.fromEntries(Object.entries(s.chargeLimits).map(([p,e])=>[p,{wh:e.wh,mode:e.mode,session_wh:e.sessionWh,fired:e.fired,pending:e.pending,error:e.error}])):{}};return {...common,permanent_ports:s?.permanent??[],full_off_ports:s?.fullOff??{}};}
+ automationResponse(path){const s=this.automationState,common={ok:true,configured:!!s,gateway_connected:!!this.producer,state_fresh:!!this.producer&&!!this.automationFresh};if(path.endsWith('charge-limits'))return {...common,limits:s?Object.fromEntries(Object.entries(s.chargeLimits).map(([p,e])=>[p,{wh:e.wh,mode:e.mode,session_wh:e.sessionWh,fired:e.fired,pending:e.pending,error:e.error,is_charging:common.state_fresh&&!!e.charging,session_sec:e.sessionSec??0,avg_power_w:e.avgPowerW??0}])):{}};return {...common,permanent_ports:s?.permanent??[],full_off_ports:s?.fullOff??{}};}
  get history(){return this._history??=new HistoryStore(this.state.storage.sql);}
  publicStatus(){
   const settings=this.settings?.settings??{}, value=this.settings?.protocolExtend??0;

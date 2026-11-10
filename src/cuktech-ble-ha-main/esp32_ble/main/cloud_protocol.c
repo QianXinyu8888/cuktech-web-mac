@@ -243,11 +243,14 @@ bool cloud_format_automation(const AutoEngine *e, char *out, size_t capacity) {
         cJSON_AddNumberToObject(item,"wh",r->limit_wh); cJSON_AddStringToObject(item,"mode",r->limit_mode==AUTO_ALWAYS?"always":"once");
         cJSON_AddNumberToObject(item,"sessionWh",p->session_wh); cJSON_AddBoolToObject(item,"fired",p->fired);
         cJSON_AddBoolToObject(item,"pending",p->pending); cJSON_AddStringToObject(item,"error",p->error);
+        cJSON_AddBoolToObject(item,"charging",p->charging);
+        cJSON_AddNumberToObject(item,"sessionSec",p->session_duration);
+        cJSON_AddNumberToObject(item,"avgPowerW",p->session_duration ? p->session_wh * 3600.0 / p->session_duration : 0);
         if(r->permanent) { ++permanent_count; cJSON_AddItemToArray(permanent,cJSON_CreateString(auto_names[i])); }
         if(r->full_mode) { ++full_count; cJSON_AddStringToObject(full,auto_names[i],r->full_mode==AUTO_ALWAYS?"always":"once"); }
     }
     bool ok=limits&&permanent&&full&&cJSON_GetArraySize(root)==5&&cJSON_GetArraySize(limits)==4 && cJSON_GetArraySize(permanent)==permanent_count && cJSON_GetArraySize(full)==full_count;
-    if(ok) for(int i=0;i<4;i++) if(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(limits,auto_names[i]))!=6)ok=false;
+    if(ok) for(int i=0;i<4;i++) if(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(limits,auto_names[i]))!=9)ok=false;
     if(ok) ok=cJSON_PrintPreallocated(root,out,capacity,false);
     cJSON_Delete(root);
     return ok;

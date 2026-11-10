@@ -36,6 +36,7 @@ static void _discover(void);
 static void _handle_cmd_recv(void);
 static void _handle_cmd_send(void);
 static void _pending_check_timeouts(void);
+static bool _send_get_async(uint8_t piid, uint32_t poll_seq);
 static void _keepalive(void);
 static void _reconnect(void);
 static void _disable_all_notifications(void);
@@ -103,6 +104,7 @@ typedef struct {
     uint64_t  deadline;
     char      cloud_id[37];
     bool      acked;
+    bool      verify_set;
     bool      no_result;
     SendPhase phase;
     uint8_t   ciphertext[CIPHER_BUF_SIZE];  // [1,0] + encrypted data
@@ -114,12 +116,30 @@ static PendingEntry _pending[MAX_PENDING] = {};
 static void _pending_check_timeouts(void) {
     uint64_t now = esp_timer_get_time() / 1000;
     for (int i = 0; i < MAX_PENDING; i++) {
-        if (!_pending[i].in_use || now < _pending[i].deadline) continue;
+        if (!_pending[i].in_use || (_state == BLE_READY && now < _pending[i].deadline)) continue;
+        if (_state == BLE_READY && _pending[i].type == PENDING_SET && _pending[i].acked) {
+            PendingEntry original = _pending[i];
+            _pending[i].in_use = false;
+            uint8_t read_seq = _seq;
+            if (_send_get_async(original.piid, 0)) {
+                for (int j = 0; j < MAX_PENDING; j++) {
+                    if (_pending[j].in_use && _pending[j].type == PENDING_GET && _pending[j].seq == read_seq) {
+                        _pending[j].verify_set = true;
+                        _pending[j].send_value = original.send_value;
+                        _pending[j].no_result = original.no_result;
+                        memcpy(_pending[j].cloud_id, original.cloud_id, sizeof(original.cloud_id));
+                        break;
+                    }
+                }
+                continue;
+            }
+            _pending[i] = original;
+        }
         ESP_LOGW(TAG, "Pending %s seq=%d piid=%d timed out",
                  _pending[i].type == PENDING_GET ? "GET" : "SET",
                  _pending[i].seq, _pending[i].piid);
         BleResult r;
-        if (_pending[i].type == PENDING_GET) {
+        if (_pending[i].type == PENDING_GET && !_pending[i].verify_set) {
             r = (BleResult){.type=RES_GET, .success=false, .piid=_pending[i].piid, .value=0, .poll_seq=_pending[i].poll_seq};
         } else {
             r = (BleResult){.type=RES_SET, .success=false, .piid=_pending[i].piid, .value=_pending[i].send_value, .poll_seq=0};
@@ -136,26 +156,36 @@ static void _pending_match(const uint8_t *resp, size_t rl) {
     uint8_t op  = resp[4];
     for (int i = 0; i < MAX_PENDING; i++) {
         if (!_pending[i].in_use || _pending[i].seq != seq) continue;
-        if (_pending[i].type == PENDING_GET && op == 0x03) {
+        if (_pending[i].type == PENDING_GET && op == 0x03 && rl >= 8 &&
+            resp[6] == SIID_CHARGER && resp[7] == _pending[i].piid) {
             uint32_t val = 0;
-            uint8_t vlen = (rl >= 12) ? resp[11] : 0;
-            if (vlen >= 4 && rl >= 17)
-                val = resp[13] | (resp[14] << 8) | (resp[15] << 16) | (resp[16] << 24);
-            else if (vlen >= 1 && rl >= 14)
-                val = resp[13];
-            BleResult r = {.type=RES_GET, .success=true, .piid=_pending[i].piid, .value=val, .poll_seq=_pending[i].poll_seq};
-            xQueueSend(result_queue, &r, pdMS_TO_TICKS(50));
+            bool ok = miot_get_response_value(seq,_pending[i].piid,resp,rl,&val);
+            bool verify = _pending[i].verify_set;
+            BleResult r = {.type=verify ? RES_SET : RES_GET, .success=ok && (!verify || val == _pending[i].send_value),
+                .piid=_pending[i].piid, .value=val, .value_confirmed=verify && ok, .poll_seq=_pending[i].poll_seq};
+            memcpy(r.cloud_id, _pending[i].cloud_id, sizeof(r.cloud_id));
+            if (!verify || !_pending[i].no_result)
+                xQueueSend(result_queue, &r, r.cloud_id[0] ? portMAX_DELAY : pdMS_TO_TICKS(50));
             _pending[i].in_use = false;
             return;
         }
-        if (_pending[i].type == PENDING_SET && op == 0x01) {
+        if (_pending[i].type == PENDING_SET && miot_set_ack_matches(seq,_pending[i].piid,resp,rl)) {
             _pending[i].acked = true;
+            _pending[i].deadline = esp_timer_get_time() / 1000 + 1000;
             return;
         }
         if (_pending[i].type == PENDING_SET && op == 0x04) {
             if (!cloud_set_response_matches(_pending[i].seq,_pending[i].piid,resp,rl)) continue;
+            uint32_t requested = _pending[i].send_value, value = requested;
+            bool echoed = miot_response_value(resp,rl,&value);
+            if (!echoed) {
+                _pending[i].acked = true;
+                _pending[i].deadline = 0;
+                return;
+            }
             if (!_pending[i].no_result) {
-                BleResult r = {.type=RES_SET, .success=true, .piid=_pending[i].piid, .value=_pending[i].send_value, .poll_seq=0};
+                BleResult r = {.type=RES_SET, .success=value==requested, .piid=_pending[i].piid,
+                               .value=value, .value_confirmed=echoed};
                 memcpy(r.cloud_id, _pending[i].cloud_id, sizeof(r.cloud_id));
                 xQueueSend(result_queue, &r, r.cloud_id[0] ? portMAX_DELAY : pdMS_TO_TICKS(50));
             }
@@ -177,6 +207,7 @@ static void _nimble_on_sync(void) {
 
 void ble_manager_loop(void) {
     if (!_nimble_ready) return;
+    if (_state != BLE_READY) _pending_check_timeouts();
     switch (_state) {
     case BLE_SCANNING:     _scan(); break;
     case BLE_CONNECTING:
@@ -598,8 +629,12 @@ static void _handle_cmd_send(void) {
         if (buf[2] == 0x01 && buf[3] == 0x01) {
             for (int i = 0; i < MAX_PENDING; i++) {
                 if (_pending[i].in_use && _pending[i].phase == SEND_AWAIT_RDY) {
-                    _wru_nr(_cmd_send_handle, _pending[i].ciphertext, _pending[i].ct_len);
-                    _pending[i].phase = SEND_AWAIT_OK;
+                    uint8_t frame[CIPHER_BUF_SIZE + 2];
+                    size_t length = miot_command_frame(frame,sizeof frame,_pending[i].ciphertext,_pending[i].ct_len);
+                    if (length && _wru_nr(_cmd_send_handle, frame, length))
+                        _pending[i].phase = SEND_AWAIT_OK;
+                    else
+                        _pending[i].deadline = 0;
                     break;
                 }
             }
@@ -621,6 +656,8 @@ static void _handle_cmd_send(void) {
  * ============================================================ */
 static bool _send_enc_start(const uint8_t *pt, size_t pt_len, uint8_t *enc_out, size_t *enc_len) {
     if (!encrypt_command(&_keys, &_send_it, pt, pt_len, enc_out, enc_len)) return false;
+    NotifItem stale;
+    while (xQueueReceive(_q_cmd_send, &stale, 0) == pdTRUE) {}
     // Write CMD HEADER [0,0,0,0,1,0] — tells device to expect one encrypted frame
     return _wru_nr(_cmd_send_handle, (uint8_t[]){0, 0, 0, 0, 1, 0}, 6);
 }
@@ -711,8 +748,9 @@ static bool _send_enc_sync(const uint8_t *pt, size_t pt_len) {
     uint8_t buf[256]; size_t blen;
     if (!_wait_cmd_send(buf, &blen, 3000)) { ESP_LOGW(TAG, "CMD_SEND: no RCV_RDY"); return false; }
     if (blen != 4 || buf[2] != 1 || buf[3] != 1) { ESP_LOGW(TAG, "RCV_RDY mismatch"); return false; }
-    uint8_t f[2+512] = {1,0}; memcpy(f + 2, enc, el);
-    if (!_wru_nr(_cmd_send_handle, f, 2 + el)) return false;
+    uint8_t frame[512 + 2];
+    size_t length = miot_command_frame(frame,sizeof frame,enc,el);
+    if (!length || !_wru_nr(_cmd_send_handle, frame, length)) return false;
     if (!_wait_cmd_send(buf, &blen, 3000)) { ESP_LOGW(TAG, "CMD_SEND: no RCV_OK"); return false; }
     if (blen != 4 || buf[2] != 1 || buf[3] != 0) { ESP_LOGW(TAG, "RCV_OK mismatch"); return false; }
     return true;
@@ -753,19 +791,15 @@ static bool _recv_cmd(uint8_t *out, size_t *ol, uint32_t ms) {
 bool ble_manager_miot_get(uint8_t piid, uint32_t* value) {
     _drain_cmd_recv_pushes();
     uint8_t buf[16] = {0};
-    buf[0] = 12; buf[1] = 0x20; buf[2] = _seq; buf[3] = 0;
+    uint8_t seq = _seq;
+    buf[0] = 12; buf[1] = 0x20; buf[2] = seq; buf[3] = 0;
     buf[4] = 0x02; buf[5] = 0x01; buf[6] = SIID_CHARGER;
     buf[7] = piid; buf[8] = 0; buf[9] = 0x01; buf[10] = 0x10; buf[11] = 0;
     _seq = (_seq + 1) & 0xFF;
     if (!_send_enc_sync(buf, 12)) return false;
     uint8_t resp[256]; size_t rl = 0;
     if (!_recv_cmd(resp, &rl, 8000)) return false;
-    if (rl < 14 || resp[4] != 0x03 || resp[7] != piid) return false;
-    uint8_t vlen = resp[11];
-    if (vlen >= 4 && rl >= 17) *value = resp[13] | (resp[14] << 8) | (resp[15] << 16) | (resp[16] << 24);
-    else if (vlen >= 1 && rl >= 14) *value = resp[13];
-    else *value = 0;
-    return true;
+    return miot_get_response_value(seq,piid,resp,rl,value);
 }
 
 bool ble_manager_miot_set(uint8_t piid, uint32_t value) {
@@ -1066,9 +1100,5 @@ bool ble_manager_send_cloud_set(uint8_t piid, uint32_t value, const char *cloud_
             return true;
         }
     }
-    return false;
-}
-bool ble_manager_has_cloud_pending(void) {
-    for (int i=0;i<MAX_PENDING;++i) if (_pending[i].in_use && _pending[i].cloud_id[0]) return true;
     return false;
 }

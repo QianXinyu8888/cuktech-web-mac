@@ -52,4 +52,3 @@ int ble_manager_pending_count(void);
 
 // Remote SET: only an actual matching response/timeout produces cloud_id result.
 bool ble_manager_send_cloud_set(uint8_t piid, uint32_t value, const char *cloud_id);
-bool ble_manager_has_cloud_pending(void);

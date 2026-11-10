@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { fileURLToPath } from 'node:url';
-test('Workers runtime upgrades authenticated sockets and forwards telemetry',async()=>{
+test('Workers runtime forwards telemetry with a full settings and automation snapshot',async()=>{
  const mf=new Miniflare(convertV4MiniflareOptions({modules:['worker.js','room.js','protocol.js','login-limiter.js','history.js','history-api.js','energy.js'].map(name=>({type:'ESModule',path:fileURLToPath(new URL('../src/'+name,import.meta.url))})),compatibilityDate:'2026-11-01',durableObjects:{ROOM:{className:'TelemetryRoom',useSQLite:true},LOGIN_LIMITER:{className:'LoginLimiter',useSQLite:true}},bindings:{VIEWER_PASSWORD:'runtime-viewer',DEVICE_TOKEN:'runtime-device',SESSION_SECRET:'runtime-session'}}));
  try{
   const origin='https://cloud.example';
@@ -13,8 +13,19 @@ test('Workers runtime upgrades authenticated sockets and forwards telemetry',asy
   const device=await mf.dispatchFetch(`${origin}/api/device`,{headers:{Upgrade:'websocket',Authorization:'Bearer runtime-device'}});assert.equal(device.status,101);device.webSocket.accept();
   const rate=new Promise(resolve=>device.webSocket.addEventListener('message',e=>resolve(JSON.parse(e.data)),{once:true}));
   assert.deepEqual(await rate,{type:'rate',intervalMs:1000});
-  const telemetry={type:'telemetry',version:1,seq:1,uptimeMs:10,bleConnected:true,ports:['c1','c2','c3','a'].map(id=>({id,voltage:5,current:1,power:5,active:true,valid:true,protocol:'PD'}))};
-  const forwarded=new Promise(resolve=>viewer.webSocket.addEventListener('message',e=>{const data=JSON.parse(e.data);if(data.type==='telemetry')resolve(data);}));device.webSocket.send(JSON.stringify(telemetry));assert.equal((await forwarded).seq,1);
+  const ports=['c1','c2','c3','a'];
+  const automation={type:'automation_state',version:1,chargeLimits:Object.fromEntries(ports.map(port=>[port,{wh:999.123456789,mode:'always',sessionWh:1234.1234567,fired:false,pending:false,error:'x'.repeat(160)}])),permanent:[],fullOff:{}};
+  const settings={type:'settings',version:1,settings:{'5':4,'6':5,'8':1440,'9':1440,'10':1440,'11':1440,'12':1440,'13':1,'15':1,'16':15,'19':1,'20':1,'21':0xffffffff},protocolExtend:0xffffffff,deviceModel:'M'.repeat(64),firmwareVersion:'V'.repeat(64)};
+  const telemetry={type:'telemetry',version:1,seq:1,uptimeMs:10,bleConnected:true,ports:ports.map(id=>({id,voltage:19.123456789,current:2.123456789,power:40.123456789,active:true,valid:true,protocol:'P'.repeat(32)}))};
+  const outcome=new Promise(resolve=>{
+   viewer.webSocket.addEventListener('message',e=>{const data=JSON.parse(e.data);if(data.type==='telemetry')resolve(data.type);});
+   device.webSocket.addEventListener('close',e=>resolve(e.reason),{once:true});
+  });
+  for(const message of [settings,automation,telemetry])device.webSocket.send(JSON.stringify(message));
+  assert.equal(await outcome,'telemetry');
+  const status=await (await mf.dispatchFetch(origin+'/api/status',{headers:{Cookie:cookie}})).json();
+  assert.equal(status.device_model,settings.deviceModel);
+  assert.equal(status.ports['1'].power,telemetry.ports[0].power);
   assert.ok(received.some(x=>x.type==='status'&&x.deviceConnected));
   viewer.webSocket.close();device.webSocket.close();
  }finally{await mf.dispose();}

@@ -1,5 +1,6 @@
 #include "cloud_protocol.h"
 #include "cloud_history.h"
+#include "miot_protocol.h"
 #include <assert.h>
 #include <string.h>
 #include <math.h>
@@ -82,11 +83,16 @@ int main(void) {
     assert(command.automation.ports[1].permanent && command.automation.ports[2].full_mode==AUTO_ONCE);
     static AutoEngine auto_engine;
     auto_engine_init(&auto_engine,&command.automation);
-    assert(cloud_format_automation(&auto_engine,out,sizeof out));
+    auto_engine.ports[0].charging=true; auto_engine.ports[0].session_duration=120; auto_engine.ports[0].session_wh=0.6f;
+    assert(cloud_format_automation(&auto_engine,out,1024));
     cJSON *auto_json=cJSON_Parse(out); assert(auto_json);
     assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(auto_json,"chargeLimits"))==4);
     assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(auto_json,"permanent"))==1);
     assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(auto_json,"fullOff"))==1);
+    cJSON *progress=cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(auto_json,"chargeLimits"),"c1");
+    assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(progress,"charging")));
+    assert(cJSON_GetObjectItemCaseSensitive(progress,"sessionSec")->valueint==120);
+    assert(fabs(cJSON_GetObjectItemCaseSensitive(progress,"avgPowerW")->valuedouble-18.0)<0.01);
     cJSON_Delete(auto_json);
     for (allocation_limit=0; allocation_limit<110; ++allocation_limit) {
         allocation_count=0; cJSON_Hooks hooks={failing_alloc,free}; cJSON_InitHooks(&hooks);
@@ -103,13 +109,37 @@ int main(void) {
     assert(cloud_command_record(&gate,&command,1704067200100ULL)==0);
     uint8_t response[8]={0,0,42,0,1,0,0,16};
     assert(!cloud_set_response_matches(42,16,response,sizeof response)); /* ACK is not a SET result */
+    assert(!miot_set_ack_matches(42,16,response,sizeof response));
+    response[6]=2;
+    assert(miot_set_ack_matches(42,16,response,sizeof response));
+    assert(!miot_set_ack_matches(41,16,response,sizeof response));
+    assert(!miot_set_ack_matches(42,6,response,sizeof response));
+    assert(!miot_set_ack_matches(42,16,response,sizeof response-1));
     response[4]=4;
+    assert(!miot_set_ack_matches(42,16,response,sizeof response));
+    response[6]=0;
     assert(!cloud_set_response_matches(42,16,response,sizeof response));
     response[6]=2;
     assert(cloud_set_response_matches(42,16,response,sizeof response));
     assert(!cloud_set_response_matches(41,16,response,sizeof response));
     assert(!cloud_set_response_matches(42,21,response,sizeof response));
     assert(!cloud_set_response_matches(42,16,response,7));
+    uint8_t encrypted[] = {0x7a, 0x00, 0xa1, 0xb2};
+    uint8_t frame[6] = {0};
+    assert(miot_command_frame(frame,sizeof frame,encrypted,sizeof encrypted)==sizeof frame);
+    assert(!memcmp(frame,(uint8_t[]){0x01,0x00,0x7a,0x00,0xa1,0xb2},sizeof frame));
+    assert(!miot_command_frame(frame,sizeof frame-1,encrypted,sizeof encrypted));
+    uint8_t get[] = {17,0x20,42,0,3,1,2,16,0,0,0,1,0x10,13};
+    uint32_t read_value=0;
+    assert(miot_get_response_value(42,16,get,sizeof get,&read_value) && read_value==13);
+    assert(!miot_get_response_value(41,16,get,sizeof get,&read_value));
+    assert(!miot_get_response_value(42,21,get,sizeof get,&read_value));
+    assert(!miot_get_response_value(42,16,get,sizeof get-1,&read_value));
+    get[9]=1;
+    assert(!miot_get_response_value(42,16,get,sizeof get,&read_value));
+    uint8_t echo[] = {17,0x20,42,0,4,1,2,21,0,0,0,4,0x50,0x0f,0x0f,0x03,0x81};
+    assert(miot_response_value(echo,sizeof echo,&read_value) && read_value==0x81030f0fU);
+    assert(!miot_response_value(echo,sizeof echo-1,&read_value));
     const struct { const char *action; const char *params; bool ok; } cases[]={
         {"port","{\"port\":\"all\",\"action\":\"off\"}",true},
         {"port","{\"port\":\"c3\",\"action\":\"toggle\"}",false},

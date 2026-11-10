@@ -63,7 +63,7 @@ export function validateAutomationParams(data){
 }
 export function validateAutomationState(data){
  if(!keys(data,['type','version','chargeLimits','permanent','fullOff'])||data.type!=='automation_state'||data.version!==1||!keys(data.chargeLimits,RULE_PORTS))throw new Error('Invalid automation state');
- for(const e of Object.values(data.chargeLimits))if(!keys(e,['wh','mode','sessionWh','fired','pending','error'])||!Number.isFinite(e.sessionWh)||e.sessionWh<0||e.sessionWh>1e9||typeof e.fired!=='boolean'||typeof e.pending!=='boolean'||typeof e.error!=='string'||new TextEncoder().encode(e.error).length>160||/[\u0000-\u001f\u007f]/.test(e.error))throw new Error('Invalid automation progress');
+ for(const e of Object.values(data.chargeLimits)){const base=['wh','mode','sessionWh','fired','pending','error'],extended=[...base,'charging','sessionSec','avgPowerW'];if(!(keys(e,base)||keys(e,extended))||!Number.isFinite(e.sessionWh)||e.sessionWh<0||e.sessionWh>1e9||typeof e.fired!=='boolean'||typeof e.pending!=='boolean'||typeof e.error!=='string'||new TextEncoder().encode(e.error).length>160||/[\u0000-\u001f\u007f]/.test(e.error)||(Object.hasOwn(e,'charging')&&(typeof e.charging!=='boolean'||!Number.isSafeInteger(e.sessionSec)||e.sessionSec<0||!Number.isFinite(e.avgPowerW)||e.avgPowerW<0||e.avgPowerW>100000)))throw new Error('Invalid automation progress');}
  validateAutomationParams({chargeLimits:Object.fromEntries(Object.entries(data.chargeLimits).map(([p,e])=>[p,{wh:e.wh,mode:e.mode}])),permanent:data.permanent,fullOff:data.fullOff});return data;
 }
 export function mergeAutomation(endpoint,body,state){

@@ -12,6 +12,11 @@ test('workerd stores only history_batch and protects history mutations',async()=
   const ack=new Promise(resolve=>ws.addEventListener('message',function receive(e){const d=JSON.parse(e.data);if(d.type==='history_ack'){ws.removeEventListener('message',receive);resolve(d);}}));const batchId=crypto.randomUUID();const samples=Array.from({length:40},(_,i)=>sample(t+i));ws.send(JSON.stringify({type:'history_batch',version:1,id:batchId,samples}));const firstAck=await ack;assert.equal(firstAck.id,batchId);assert.equal(firstAck.accepted,40);ws.close();
   device=await mf.dispatchFetch(origin+'/api/device',{headers:{Upgrade:'websocket',Authorization:'Bearer device'}});ws=device.webSocket;ws.accept();const retryAck=new Promise(resolve=>ws.addEventListener('message',e=>{const d=JSON.parse(e.data);if(d.type==='history_ack')resolve(d);}));ws.send(JSON.stringify({type:'history_batch',version:1,id:batchId,samples}));assert.deepEqual(await retryAck,{type:'history_ack',id:batchId,accepted:0});
   const readings=await (await get('/api/history/1')).json();assert.equal(readings.data.length,40);const sessions=await (await get('/api/sessions?period=all')).json();assert.equal(sessions.total,1);
+  const chartPath='/api/chart?hours=1&interval=300';
+  const chart=await get(chartPath);assert.equal(chart.status,200);
+  const etag=chart.headers.get('etag');assert.ok(etag);
+  const unchanged=await mf.dispatchFetch(origin+chartPath,{headers:{Cookie:cookie,'If-None-Match':etag}});
+  assert.equal(unchanged.status,304);
   assert.equal((await mf.dispatchFetch(origin+'/api/port-modes',{method:'POST',headers:{Origin:origin,Cookie:cookie},body:'{}'})).status,503);
   assert.equal((await mf.dispatchFetch(origin+'/api/charge-limits',{method:'POST',headers:{Origin:origin,Cookie:cookie},body:'{}'})).status,503);
   const deleted=await mf.dispatchFetch(origin+'/api/sessions/clear',{method:'POST',headers:{Origin:origin,Cookie:cookie},body:'{}'});assert.equal(deleted.status,200);ws.close();

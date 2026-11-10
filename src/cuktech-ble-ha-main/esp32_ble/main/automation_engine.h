@@ -11,7 +11,7 @@ typedef struct { uint32_t t; float power; } AutoPoint;
 typedef struct {
     AutoPoint points[AUTO_WINDOW]; uint16_t head,count;
     float session_wh,last_power,peak,restart_w,grace;
-    uint32_t last_time,session_start,above_since,hold_since,no_load_since,last_eval,retry_at;
+    uint32_t last_time,session_start,session_duration,above_since,hold_since,no_load_since,last_eval,retry_at;
     bool charging,post_session,pending,inflight,fired,from_session;
     uint8_t attempts,reason;
     char error[32];

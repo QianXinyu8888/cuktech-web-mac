@@ -46,6 +46,7 @@ typedef struct {
     uint8_t protocol;
     uint8_t status;
     bool ble_ready;
+    bool value_confirmed;
     char cloud_id[37];
 } BleResult;
 

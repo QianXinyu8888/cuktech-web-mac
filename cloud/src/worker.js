@@ -70,7 +70,10 @@ export default {
    if(request.method!=='GET'&&!sameOrigin)return json({ok:false,error:'Forbidden origin'},403);
    if(!await authorizedSession(request,env))return json({ok:false,error:'Unauthorized'},401);
    let body;if(request.method!=='GET'){if(Number(request.headers.get('Content-Length'))>16384)return json({ok:false,error:'Body too large'},413);body=await request.text();if(enc.encode(body).length>16384)return json({ok:false,error:'Body too large'},413);}
-   return room(env).fetch(new Request('https://room'+routePath+url.search,{method:request.method,headers:{'X-Device-Id':device},...(body?{body}:{})}));
+   const headers=new Headers({'X-Device-Id':device});
+   const etag=request.headers.get('If-None-Match');
+   if(routePath==='/api/chart'&&etag)headers.set('If-None-Match',etag);
+   return room(env).fetch(new Request('https://room'+routePath+url.search,{method:request.method,headers,...(body?{body}:{})}));
   }
   if(['/api/status','/api/devices','/api/port','/api/set','/api/protocol','/api/enable'].includes(routePath)){
    const control=!['/api/status','/api/devices'].includes(routePath);

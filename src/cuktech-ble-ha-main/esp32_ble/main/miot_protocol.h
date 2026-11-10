@@ -30,3 +30,8 @@
 // --- TLV Type IDs ---
 #define TID_UINT8            1
 #define TID_UINT32           5
+
+size_t miot_command_frame(uint8_t *frame, size_t capacity, const uint8_t *encrypted, size_t length);
+bool miot_response_value(const uint8_t *response, size_t length, uint32_t *value);
+bool miot_get_response_value(uint8_t seq, uint8_t piid, const uint8_t *response, size_t length, uint32_t *value);
+bool miot_set_ack_matches(uint8_t seq, uint8_t piid, const uint8_t *response, size_t length);

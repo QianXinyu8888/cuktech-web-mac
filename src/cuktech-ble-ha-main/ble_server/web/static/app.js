@@ -1458,7 +1458,7 @@
         function updateSummary(ports) {
             let totalPower = 0, activeCount = 0, maxV = 0;
             for (const [id, port] of Object.entries(ports || {})) {
-                if ((port.current > 0 || port.power > 0) && (port.enabledKnown === false || port.enabled !== false)) {
+                if (port.valid !== false && (port.current > 0 || port.power > 0) && (port.enabledKnown === false || port.enabled !== false)) {
                     totalPower += port.power;
                     activeCount++;
                     maxV = Math.max(maxV, port.voltage);
@@ -1560,16 +1560,16 @@
             }
             let html = '';
             for (const [id, name] of Object.entries(PORT_MAP)) {
-                const port = ports[id] || { voltage: 0, current: 0, power: 0, enabled: false, protocol: 'idle' };
+                const port = ports[id] || { voltage: 0, current: 0, power: 0, enabled: false, enabledKnown: false, valid: false, protocol: 'idle' };
                 const key = PORT_KEY_MAP[id];
                 const checked = (isRecent() && savedChecks.hasOwnProperty(key)) ? savedChecks[key] : port.enabled;
                 const valid = port.valid !== false;
-                const pct = loadPct(port.power, id);
+                const pct = valid ? loadPct(port.power, id) : 0;
                 // 负载条的分母是本口上限（见 PORT_MAX_W），不是实时功率的比例——
                 // 必须写在提示里，否则"22W 只填了 18%"看起来像 bug。
                 const basis = I18N.t('index.loadBasis', { max: PORT_MAX_W[id] || 100 });
                 html += `
-                    <div class="port-card ${checked ? 'active' : ''}${port.power > 0 ? ' is-charging' : ''}" id="port-${id}" onclick="handlePortClick(event, ${id})">
+                    <div class="port-card ${checked ? 'active' : ''}${valid && port.power > 0 ? ' is-charging' : ''}" id="port-${id}" onclick="handlePortClick(event, ${id})">
                         <div class="port-header">
                             <span class="port-name ${key}">
                                 <span class="port-icon"><img id="portIcon${key.toUpperCase()}" src="/static/plugin_imgs/main_card_port_${key}_${checked ? 'on' : 'off'}.png" alt=""></span>
@@ -1895,20 +1895,11 @@
                             updateStatusBadge(msg.connected, msg.authenticated, msg.mqtt_connected);
                             updateBleButton();
                             renderFirmwareChip();
-                            if (!dev.bleConnected) {
-                                // Disconnect: clear port data
-                                for (const id of Object.keys(PORT_MAP)) {
-                                    dev.ports[id] = { voltage: 0, current: 0, power: 0, active: false, protocol: 'idle', enabled: true };
-                                }
+                            if (!dev.bleConnected || msg.ports) {
+                                // DeviceStore already applied this snapshot or cleared the readings on disconnect.
                                 renderPorts(dev.ports);
                                 updateDeviceContainer(dev.ports);
                                 updateSummary(dev.ports);
-                            } else if (msg.ports) {
-                                // Reconnect: apply full state
-                                dev.ports = msg.ports;
-                                renderPorts(msg.ports);
-                                updateDeviceContainer(msg.ports);
-                                updateSummary(msg.ports);
                             }
                             if (msg.settings) {
                                 updateSettingsUI(msg.settings);
