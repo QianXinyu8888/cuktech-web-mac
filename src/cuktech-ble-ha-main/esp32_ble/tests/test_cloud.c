@@ -195,13 +195,21 @@ int main(void) {
     event=cJSON_Parse(out); assert(event && cJSON_GetArraySize(event)==2); cJSON_Delete(event);
     assert(!cloud_history_discard(&history,301));
     CloudHistoryFlight flight={0};
+    /* Keep a retryable batch small enough for slow mobile connections. */
+    assert(CLOUD_HISTORY_BATCH_MAX <= 5);
     assert(cloud_history_begin_batch(&history,&flight,"12345678-1234-4234-8234-123456789abc"));
-    assert(flight.count==60);
+    assert(flight.count==CLOUD_HISTORY_BATCH_MAX);
+    char batch[8192];
+    assert(cloud_history_format_batch(&history,flight.id,flight.count,batch,sizeof batch));
+    event=cJSON_Parse(batch);assert(event);
+    assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(event,"samples"))==CLOUD_HISTORY_BATCH_MAX);
+    cJSON_Delete(event);
+    assert(!cloud_history_format_batch(&history,flight.id,flight.count,batch,16));
     assert(!cloud_history_ack_batch(&history,&flight,"ffffffff-1234-4234-8234-123456789abc"));
-    assert(history.count==300 && flight.count==60);
-    assert(cloud_history_ack_batch(&history,&flight,"12345678-1234-4234-8234-123456789abc") && history.count==240);
+    assert(history.count==300 && flight.count==CLOUD_HISTORY_BATCH_MAX);
+    assert(cloud_history_ack_batch(&history,&flight,"12345678-1234-4234-8234-123456789abc") && history.count==300-CLOUD_HISTORY_BATCH_MAX);
     assert(!cloud_history_ack_batch(&history,&flight,"12345678-1234-4234-8234-123456789abc"));
-    assert(cloud_history_peek(&history,0,&first) && first.timestamp==1704067260);
+    assert(cloud_history_peek(&history,0,&first) && first.timestamp==1704067200+CLOUD_HISTORY_BATCH_MAX);
     snapshot.ble_connected=false; assert(cloud_history_pack(&snapshot,1704068000,&sample));
     assert(!(sample.ports[0].flags&2));
     char ack_id[37];

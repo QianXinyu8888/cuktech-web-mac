@@ -2,6 +2,7 @@
 #include "cloud_history.h"
 #include "esp_random.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "freertos/FreeRTOS.h"
@@ -122,25 +123,17 @@ static void batch_uuid(char out[37]) {
         bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],bytes[8],bytes[9],
         bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]);
 }
-/* Stream one complete text message, using continuation frames to bound peak heap use. */
+/* Send each small batch in one call so the websocket task can receive replies
+   between batches instead of blocking realtime telemetry on dozens of writes. */
 static bool send_history_batch(esp_websocket_client_handle_t client, const char *id, size_t count) {
-    char chunk[1024];
-    int64_t deadline=esp_timer_get_time()+3000000;
-    int length=snprintf(chunk,sizeof chunk,"{\"type\":\"history_batch\",\"version\":1,\"id\":\"%s\",\"samples\":[",id);
-    if (esp_websocket_client_send_text_partial(client,chunk,length,pdMS_TO_TICKS(250))!=length) return false;
-    for (size_t i=0;i<count;++i) {
-        if (esp_timer_get_time()>deadline) return false;
-        CloudHistorySample sample;
-        xSemaphoreTake(history_mutex,portMAX_DELAY);
-        bool exists=cloud_history_peek(&history_queue,i,&sample);
-        xSemaphoreGive(history_mutex);
-        chunk[0]=',';
-        if (!exists || !cloud_history_format_sample(&sample,chunk+(i?1:0),sizeof(chunk)-(i?1:0))) return false;
-        length=strlen(chunk);
-        if (esp_websocket_client_send_cont_msg(client,chunk,length,pdMS_TO_TICKS(250))!=length) return false;
-    }
-    if (esp_websocket_client_send_cont_msg(client,"]}",2,pdMS_TO_TICKS(250))!=2) return false;
-    return esp_websocket_client_send_fin(client,pdMS_TO_TICKS(250))>=0;
+    size_t capacity=CLOUD_HISTORY_BATCH_MAX*1024+128;
+    char *message=malloc(capacity);if(!message)return false;
+    xSemaphoreTake(history_mutex,portMAX_DELAY);
+    bool formatted=cloud_history_format_batch(&history_queue,id,count,message,capacity);
+    xSemaphoreGive(history_mutex);
+    int length=formatted?(int)strlen(message):0;
+    bool sent=formatted&&esp_websocket_client_send_text(client,message,length,pdMS_TO_TICKS(5000))==length;
+    free(message);return sent;
 }
 static void cloud_task(void *arg) {
     (void)arg;
@@ -150,9 +143,9 @@ static void cloud_task(void *arg) {
     esp_sntp_init();
     esp_websocket_client_config_t conf={
         .uri=uri, .headers=authorization, .crt_bundle_attach=esp_crt_bundle_attach,
-        .reconnect_timeout_ms=10000, .network_timeout_ms=10000,
+        .reconnect_timeout_ms=2000, .network_timeout_ms=10000,
         .ping_interval_sec=20, .pingpong_timeout_sec=30,
-        .buffer_size=512, .task_stack=6144,
+        .buffer_size=4096, .task_stack=6144,
     };
     esp_websocket_client_handle_t client=NULL;
     uint64_t seq=0;

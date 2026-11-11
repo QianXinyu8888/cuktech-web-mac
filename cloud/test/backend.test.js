@@ -38,6 +38,15 @@ test('room forwards only accepted snapshots and recovers without database',()=>{
  room.webSocketMessage(d,JSON.stringify({...sample(),seq:2}));assert.equal(v.sent.filter(x=>x.type==='telemetry').length,1);
  room.webSocketClose(d);assert.equal(v.sent.at(-1).type,'status');assert.equal(v.sent.at(-1).deviceConnected,false);
 });
+test('one-second live samples tolerate moderate network jitter without allowing bursts',()=>{
+ const original=Date.now;let now=100000;Date.now=()=>now;
+ try{const d=new Socket({role:'device'}),v=new Socket({role:'viewer',expiresAt:200000});const room=new TelemetryRoom(state([d,v]));
+  room.webSocketMessage(d,JSON.stringify(sample()));now+=400;room.webSocketMessage(d,JSON.stringify({...sample(),seq:2}));
+  assert.equal(v.sent.filter(x=>x.type==='telemetry').length,1);
+  now+=450;room.webSocketMessage(d,JSON.stringify({...sample(),seq:3}));
+  assert.equal(v.sent.filter(x=>x.type==='telemetry').length,2);
+ }finally{Date.now=original;}
+});
 test('expired viewers close before receiving data or sending ping',()=>{
  const v=new Socket({role:'viewer',expiresAt:Date.now()-1,sessionId:'expired'});const room=new TelemetryRoom(state([v]));room.broadcast({type:'status',deviceConnected:true});assert.equal(v.sent.length,0);assert.equal(v.closed[0],1008);
  const v2=new Socket({role:'viewer',expiresAt:Date.now()-1,sessionId:'expired'});new TelemetryRoom(state([v2])).webSocketMessage(v2,'{"type":"ping"}');assert.equal(v2.sent.length,0);assert.equal(v2.closed[0],1008);

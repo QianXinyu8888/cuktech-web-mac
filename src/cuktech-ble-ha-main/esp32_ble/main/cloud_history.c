@@ -51,6 +51,20 @@ bool cloud_history_format_sample(const CloudHistorySample *sample, char *out, si
     }
     n=snprintf(out+used,capacity-used,"]}"); return n>=0 && (size_t)n<capacity-used;
 }
+bool cloud_history_format_batch(const CloudHistoryQueue *queue,const char *id,size_t count,char *out,size_t capacity) {
+    if(!queue||!id||strlen(id)!=36||!out||count==0||count>CLOUD_HISTORY_BATCH_MAX||count>queue->count)return false;
+    int n=snprintf(out,capacity,"{\"type\":\"history_batch\",\"version\":1,\"id\":\"%s\",\"samples\":[",id);
+    if(n<0||(size_t)n>=capacity)return false;
+    size_t used=(size_t)n;
+    for(size_t i=0;i<count;i++) {
+        CloudHistorySample sample;
+        if(!cloud_history_peek(queue,i,&sample))return false;
+        if(i) {if(used+1>=capacity)return false;out[used++]=',';}
+        if(!cloud_history_format_sample(&sample,out+used,capacity-used))return false;
+        used+=strlen(out+used);
+    }
+    n=snprintf(out+used,capacity-used,"]}");return n>=0&&(size_t)n<capacity-used;
+}
 bool cloud_history_begin_batch(const CloudHistoryQueue *queue, CloudHistoryFlight *flight, const char *id) {
     if (flight->count || queue->count<CLOUD_HISTORY_BATCH_MAX || !id || strlen(id)!=36) return false;
     strcpy(flight->id,id); flight->count=CLOUD_HISTORY_BATCH_MAX; return true;

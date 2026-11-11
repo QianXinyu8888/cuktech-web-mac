@@ -75,7 +75,10 @@ class DeviceRoom {
   if(data?.type==='settings'){try{validateSettings(data);const attachment={...a,settings:data};if(new TextEncoder().encode(JSON.stringify(attachment)).length>=MAX_ATTACHMENT_BYTES)throw new Error('Attachment too large');this.settings=data;socket.serializeAttachment(attachment);this.broadcast({type:'settings',...data});this.broadcast({type:'mac-status',data:this.publicStatus()});}catch{socket.close(1008,'Invalid settings');this.disconnect(socket);}return;}
   try{validateTelemetry(data);}catch{socket.close(1008,'Invalid telemetry');this.disconnect(socket);return;}
   const now=Date.now(), interval=this.viewers.size?LIVE_INTERVAL_MS:IDLE_INTERVAL_MS;
-  if(a.lastAcceptedAt!==undefined && now-a.lastAcceptedAt<interval)return;
+  // Network jitter can make consecutive one-second samples arrive slightly
+  // early; dropping those doubles the apparent update interval.
+  const minimumInterval=this.viewers.size?interval-250:interval;
+  if(a.lastAcceptedAt!==undefined && now-a.lastAcceptedAt<minimumInterval)return;
   this.latest={...data,receivedAt:now};
   const attachment={...a,role:'device',lastAcceptedAt:now,latest:this.latest,...(this.settings?{settings:this.settings}:{}),...(a.automationProgress?{automationProgress:a.automationProgress}:{})};
   if(new TextEncoder().encode(JSON.stringify(attachment)).length>=MAX_ATTACHMENT_BYTES){socket.close(1008,'Snapshot too large');this.disconnect(socket);return;}
