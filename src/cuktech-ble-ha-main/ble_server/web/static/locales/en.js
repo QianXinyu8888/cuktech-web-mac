@@ -166,6 +166,7 @@
         // ── Charge limit (auto power-off at a set Wh) ──
         chargeLimit: {
             title: 'Charge Limit',
+            reliability: 'Automatic shutoff requires a running service and Bluetooth; it is not a safety protection. Check the status below. Unsaved data may be lost on power failure.',
             hint: 'Energy is the charger output (Wh), not what the device actually absorbs (cable/conversion losses)',
             unit: 'Wh',
             placeholder: 'Wh',

@@ -202,6 +202,7 @@ function indexChain() {
         fs.readFileSync(path.join(STATIC, 'chart-config.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'chart-loader.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'device-store.js'), 'utf8'),
+        fs.readFileSync(path.join(STATIC, 'port-ui.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'device-bench.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'charge_history.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'charge_limit.js'), 'utf8'),
@@ -217,6 +218,7 @@ check('index.html chain: chart-config + chart-loader + device-store + device-ben
 check('phone.html chain: device-store + device-bench + charge_history + charge_limit + phone.js', () => {
     const parts = [
         fs.readFileSync(path.join(STATIC, 'device-store.js'), 'utf8'),
+        fs.readFileSync(path.join(STATIC, 'port-ui.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'device-bench.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'charge_history.js'), 'utf8'),
         fs.readFileSync(path.join(STATIC, 'charge_limit.js'), 'utf8'),

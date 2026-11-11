@@ -35,8 +35,8 @@ function setup() {
       config.querySelector('[data-remote-back]').href = '/phone.html';
     }
   } else {
-    actions.className = 'remote-actions remote-actions-floating';
-    document.body.append(actions);
+    actions.className = 'remote-actions remote-actions-page';
+    (document.querySelector('.footer-inner') || document.querySelector('#app') || document.body).append(actions);
   }
 
   const open = button('管理设备', show);

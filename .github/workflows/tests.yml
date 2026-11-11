@@ -24,6 +24,11 @@ jobs:
           for file in src/cuktech-ble-ha-main/ble_server/tests/js/*_test.js; do
             node "$file" || exit 1
           done
+      - name: Cloud regression tests
+        working-directory: cloud
+        run: |
+          npm ci
+          npm test
       - run: python scripts/check_publication.py
       - name: Dependency vulnerability audit
         run: |

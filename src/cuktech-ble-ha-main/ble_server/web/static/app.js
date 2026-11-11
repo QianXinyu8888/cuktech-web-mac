@@ -365,6 +365,7 @@
                                 ${CL.modeChipsHtml(key)}
                             </div>
                             <div class="limit-perm-panel" id="limit-perm-${key}"></div>
+                            <div class="automation-state-note" id="automation-note-${key}" role="status"></div>
                             <div class="charge-limit-bar"><div class="charge-limit-bar-fill" id="limit-bar-${key}"></div></div>
                             <div class="charge-limit-progress" id="limit-progress-${key}"></div>
                             <div class="countdown-input-group">
@@ -403,6 +404,8 @@
 
                 // "已配置"= 有能量限额 / 充满即停 / 长期供电：进度条与状态点共用同一判定
                 const armed = CL.isArmed(key);
+                const automationNote=document.getElementById(`automation-note-${key}`);
+                if(automationNote) automationNote.textContent=PortUI.automation(e,CL.state.fresh,armed,CL.isPermanent(key));
 
                 const progressEl = document.getElementById(`limit-progress-${key}`);
                 if (progressEl) {
@@ -1490,29 +1493,30 @@
             const card = document.getElementById(`port-${portId}`);
             if (!card) return renderPorts(dev.ports);
             const merged = dev.ports[key];
+            const showReading=merged.valid !== false && !(merged.enabledKnown !== false && merged.enabled === false);
             // 大读数 + 负载条 + V/A 行直接改文本，不重建卡片
             const pw = card.querySelector('.port-power-value');
-            if (pw) pw.textContent = merged.power.toFixed(1);
-            const charging = merged.power > 0;
+            if (pw) pw.textContent = showReading ? merged.power.toFixed(1) : '—';
+            const charging = showReading && merged.power > 0;
             const fill = card.querySelector('.port-load-fill');
-            if (fill) fill.style.width = loadPct(merged.power, Number(portId)) + '%';
+            if (fill) fill.style.width = (showReading ? loadPct(merged.power, Number(portId)) : 0) + '%';
             // 空载时连轨道一起淡掉：留着一条满宽灰槽看着像"进度卡在 0%"，与"这个口没插东西"不符
             const track = card.querySelector('.port-load');
             if (track) track.classList.toggle('is-idle', !charging);
             card.classList.toggle('is-charging', charging);
             const va = card.querySelector('.port-va');
-            if (va) va.textContent = `${merged.voltage.toFixed(1)}V · ${merged.current.toFixed(1)}A`;
+            if (va) va.textContent = showReading ? `${merged.voltage.toFixed(1)}V · ${merged.current.toFixed(1)}A` : '—';
             // 协议徽标文字 + 选中态
             const protoEl = card.querySelector('.port-protocol');
             if (protoEl) {
-                protoEl.textContent = merged.protocol;
-                protoEl.classList.toggle('is-active', merged.protocol !== 'idle');
+                protoEl.textContent = PortUI.protocol(merged) || PortUI.status(merged);
+                protoEl.classList.toggle('is-active', !!PortUI.protocol(merged));
             }
             // Update active class (enabled comes from PIID 16, not BLE data)
             card.classList.toggle('active', merged.enabled !== false);
             // Update toggle checkbox
             const toggle = document.getElementById(`toggle-${PORT_KEY_MAP[portId]}`);
-            if (toggle) toggle.checked = merged.enabled !== false;
+            if (toggle) { toggle.checked = merged.enabled !== false; if (!toggle.dataset.pending) toggle.disabled = merged.enabledKnown === false; }
             // 端口图标也有 on/off 两版，跟着开关一起换
             const icon = document.getElementById(`portIcon${PORT_KEY_MAP[portId].toUpperCase()}`);
             if (icon) icon.src = `/static/plugin_imgs/main_card_port_${PORT_KEY_MAP[portId]}_${merged.enabled !== false ? 'on' : 'off'}.png`;
@@ -1547,6 +1551,7 @@
             if (typeof ConnectionFeedback !== 'undefined') ConnectionFeedback.refresh();
         }
 
+        const pendingPorts=new Set();
         function renderPorts(ports) {
             const grid = document.getElementById('portGrid');
             // Save current toggle states during recent-change window
@@ -1564,7 +1569,8 @@
                 const key = PORT_KEY_MAP[id];
                 const checked = (isRecent() && savedChecks.hasOwnProperty(key)) ? savedChecks[key] : port.enabled;
                 const valid = port.valid !== false;
-                const pct = valid ? loadPct(port.power, id) : 0;
+                const showReading=valid && !(port.enabledKnown !== false && port.enabled === false);
+                const pct = showReading ? loadPct(port.power, id) : 0;
                 // 负载条的分母是本口上限（见 PORT_MAX_W），不是实时功率的比例——
                 // 必须写在提示里，否则"22W 只填了 18%"看起来像 bug。
                 const basis = I18N.t('index.loadBasis', { max: PORT_MAX_W[id] || 100 });
@@ -1573,20 +1579,20 @@
                         <div class="port-header">
                             <span class="port-name ${key}">
                                 <span class="port-icon"><img id="portIcon${key.toUpperCase()}" src="/static/plugin_imgs/main_card_port_${key}_${checked ? 'on' : 'off'}.png" alt=""></span>
-                                ${name}
+                                <span class="sr-only">${name}</span>
                             </span>
                             <label class="port-toggle" onclick="event.stopPropagation()">
-                                <input type="checkbox" id="toggle-${key}" ${checked ? 'checked' : ''} ${port.enabledKnown === false ? 'disabled' : ''} onchange="togglePort('${key}', this.checked)">
+                                <input type="checkbox" id="toggle-${key}" ${checked ? 'checked' : ''} ${port.enabledKnown === false || pendingPorts.has(DeviceStore.current()+':'+key) ? 'disabled' : ''} onchange="togglePort('${key}', this.checked)">
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="port-power" title="${basis}">
-                            <span class="port-power-value">${valid ? port.power.toFixed(1) : '—'}</span><span class="port-power-unit">W</span>
+                            <span class="port-power-value">${showReading ? port.power.toFixed(1) : '—'}</span><span class="port-power-unit">W</span>
                         </div>
                         <div class="port-load${pct ? '' : ' is-idle'}" title="${basis}"><div class="port-load-fill" data-port="${id}" style="width:${pct}%"></div></div>
                         <div class="port-sub">
-                            <span class="port-va">${valid ? `${port.voltage.toFixed(1)}V · ${port.current.toFixed(1)}A` : '—'}</span>
-                            <span class="port-protocol">${valid ? port.protocol : '—'}</span>
+                            <span class="port-va">${showReading ? `${port.voltage.toFixed(1)}V · ${port.current.toFixed(1)}A` : '—'}</span>
+                            <span class="port-protocol">${PortUI.protocol(port) || PortUI.status(port)}</span>
                         </div>
                     </div>`;
             }
@@ -1624,21 +1630,30 @@
         }
 
         async function togglePort(port, on) {
-            markLocal();
             const toggle = document.getElementById(`toggle-${port}`);
-            if (toggle) toggle.disabled = true;
+            const wanted=DeviceStore.current();
+            const pendingKey=wanted+':'+port;
+            if(pendingPorts.has(pendingKey)){if(toggle)toggle.checked=!on;return;}
+            const id=Object.keys(PORT_KEY_MAP).find(id=>PORT_KEY_MAP[id]===port);
+            const current=dev.ports[id];
+            if (toggle) toggle.checked=!on;
+            if (!on && (!current || current.valid === false || current.power > 0) && !await PortUI.confirmOff(port)) return;
+            if(DeviceStore.current()!==wanted)return;
+            if(pendingPorts.has(pendingKey))return;
+            pendingPorts.add(pendingKey);
+            if (toggle) { toggle.disabled = true; toggle.dataset.pending='1'; }
+            showToast(PortUI.text('正在发送端口指令…','Sending port command…'));
             try {
                 const res = await api('/api/port', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port, action: on ? 'on' : 'off' }) });
                 const result = await res.json();
-                if (!result.ok) {
-                    if (toggle) toggle.checked = !on;
-                }
+                if (!res.ok || !result.ok) throw new Error(result.error || 'request rejected');
+                if (DeviceStore.current()===wanted) { if(toggle) toggle.checked=on; showToast(PortUI.text('端口指令已确认','Port command confirmed')); await fetchStatus(); }
             } catch (e) {
                 console.error('Port toggle error:', e);
-                if (toggle) toggle.checked = !on;
+                if (DeviceStore.current()===wanted) { if (toggle) toggle.checked = !on; showToast(PortUI.text('操作未确认，请检查连接和端口状态','Command not confirmed; check connection and port status')); await fetchStatus(); }
             } finally {
-                if (toggle) toggle.disabled = false;
-                // SSE port_update will update UI automatically
+                pendingPorts.delete(pendingKey);
+                if (toggle) { delete toggle.dataset.pending; toggle.disabled = dev.ports[id]?.enabledKnown === false; }
             }
         }
 

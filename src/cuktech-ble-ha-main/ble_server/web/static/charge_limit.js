@@ -276,14 +276,17 @@
             .then(function (data) {
                 if (data && data.ok && data.limits) {
                     state.limits = data.limits;
+                    state.fresh = typeof data.state_fresh === 'boolean' ? data.state_fresh : null;
                     state.loaded = true;
                     state.error = null;
                 } else {
+                    state.fresh = false;
                     state.error = (data && data.error) || 'invalid response';
                 }
                 return state;
             })
             .catch(function (e) {
+                state.fresh = false;
                 state.error = e && e.message ? e.message : String(e);
                 return state;
             });
@@ -453,6 +456,8 @@
     }
 
     function statusText(port) {
+        var warning=global.PortUI && global.PortUI.automation(entryFor(port),state.fresh,isArmed(port));
+        if(warning && (state.fresh===false || entryFor(port).error || entryFor(port).pending)) return warning;
         // 与状态点同源：常供口也算"已启用"（卡面上那行文字被收起，但读屏/提示仍会念）
         var text = isArmed(port) ? t('chargeLimit.enabled') : t('chargeLimit.off');
         // 两个来源（能量限额 / 充满即停）合并成一个"已触发"后缀：分开写会拼出

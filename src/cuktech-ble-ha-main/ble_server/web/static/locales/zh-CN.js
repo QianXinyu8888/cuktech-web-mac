@@ -166,6 +166,7 @@
         // ── Charge limit (充到指定 Wh 自动关断) ──
         chargeLimit: {
             title: '充电量限额',
+            reliability: '自动关闭依赖服务运行和蓝牙连接，不能替代安全保护。请留意下方运行状态；断电时未保存的数据可能丢失。',
             hint: '电量指充电器输出能量（Wh），非设备实际充入电量（有线损/转换损耗）',
             unit: 'Wh',
             placeholder: 'Wh',

@@ -38,11 +38,15 @@
     static freshness(state,receivedAt) {
       const el=document.getElementById?.('cloudFreshness');if(!el)return;
       const en=(window.I18N?.getLocale?.()||'').startsWith('en');
-      const labels={stale:['数据已过期','Data is stale'],offline:['网关离线','Gateway offline'],'ble-off':['网关在线 · 蓝牙未连接','Gateway online · BLE disconnected'],live:['实时数据','Live'],connecting:['正在连接网关…','Connecting to gateway…']};
+      const labels={stale:['数据已过期 · 检查网络','Data is stale · check network'],offline:['网关离线 · 检查 ESP32 供电和 Wi-Fi','Gateway offline · check power and Wi-Fi'],'ble-off':['网关在线 · 蓝牙未连接','Gateway online · BLE disconnected'],live:['网页 · 云端 · 网关 · 蓝牙已连接','Web · cloud · gateway · BLE connected'],connecting:['网页正在连接云端…','Connecting to cloud…']};
       const label=labels[state][en?1:0];
       if(el.textContent!==label)el.textContent=label;
       const time=document.getElementById('cloudFreshnessTime');
-      if(time)time.textContent=receivedAt?` · ${new Date(receivedAt).toLocaleTimeString()}`:'';
+      if(time) {
+        const seconds=receivedAt?Math.max(0,Math.floor((Date.now()-receivedAt)/1000)):null;
+        time.textContent=seconds===null?'':en?` · Updated ${seconds}s ago`:` · 最后更新 ${seconds} 秒前`;
+        time.title=receivedAt?new Date(receivedAt).toLocaleTimeString():'';
+      }
     }
     updateFreshness(msg) {
       const device=msg.device||'default';
@@ -106,7 +110,7 @@
         if(!msg.bleConnected)return [];
         const ids={c1:1,c2:2,c3:3,a:4};
         const device=msg.device||'default';
-        return msg.ports.filter(p=>p.valid).map(p=>({type:'port_update',device,port_id:ids[p.id],data:{...p,enabled:CloudEvents.latestPorts?.[device]?.[ids[p.id]]?.enabled ?? false,enabledKnown:CloudEvents.latestPorts?.[device]?.[ids[p.id]]?.enabledKnown}}));
+        return msg.ports.map(p=>({type:'port_update',device,port_id:ids[p.id],data:{...p,enabled:CloudEvents.latestPorts?.[device]?.[ids[p.id]]?.enabled ?? false,enabledKnown:CloudEvents.latestPorts?.[device]?.[ids[p.id]]?.enabledKnown}}));
       }
       if(msg.type==='status' && 'deviceConnected' in msg && !('connected' in msg))return msg.deviceConnected?[]:[CloudEvents.offlineStatus(msg.device||'default')];
       return [msg];

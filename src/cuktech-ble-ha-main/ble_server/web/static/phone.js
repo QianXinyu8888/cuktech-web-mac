@@ -351,12 +351,13 @@ function renderSceneCard() {
     });
 }
 
+const pendingPortCommands=new Set();
 function renderPortCtl() {
     for (const key of PORT_KEYS) {
         const p = state.ports[key];
         const enabled = p.enabled !== false;
         const toggle = document.getElementById('toggle' + key.toUpperCase());
-        if (toggle) { toggle.checked = enabled; toggle.disabled = p.enabledKnown === false; }
+        if (toggle) { toggle.checked = enabled; toggle.disabled = p.enabledKnown === false || pendingPortCommands.has(DeviceStore.current()+':'+key); }
         const icon = document.querySelector(`#toggle${key.toUpperCase()}`).closest('.port-ctl-item').querySelector('.port-ctl-port-icon img');
         if (icon) {
             icon.src = enabled
@@ -391,7 +392,7 @@ function renderRateCard() {
         const enabled = state.ports[key].enabled || p.enabledKnown === false;
         const w = enabled && p.valid !== false ? p.w : 0;
         const status = enabled && w > 0 ? w.toFixed(1) : '--';
-        const protocol = enabled && p.protocol ? p.protocol : '';
+        const protocol = typeof PortUI !== 'undefined' ? (PortUI.protocol(p) || PortUI.status(p)) : (p.protocol || '');
         const name = (key === 'c3' && isMerged) ? 'C3&A' : PORT_NAMES[key];
         row.innerHTML = `<div class="port-power-row" style="margin-bottom:2px;">
             <div class="port-power-dot" style="background:${PORT_COLORS[key]}"></div>
@@ -594,6 +595,7 @@ function limitCardHtml(key, CL) {
                     ${CL.modeChipsHtml(key)}
                 </div>
                 <div class="limit-perm-panel" id="limitPerm_${key}"></div>
+                <div class="automation-state-note" id="automationNote_${key}" role="status"></div>
                 <div class="charge-limit-track"><div class="charge-limit-fill" id="limitBar_${key}"></div></div>
                 <div class="charge-limit-progress" id="limitProgress_${key}"></div>
                 <div class="charge-limit-inputs">
@@ -792,6 +794,8 @@ function updateChargeLimitUI() {
     const CL = ChargeLimit;
     for (const key of PORT_KEYS) {
         const e = CL.entryFor(key);
+        const note=document.getElementById(`automationNote_${key}`);
+        if(note && typeof PortUI !== 'undefined') note.textContent=PortUI.automation(e,CL.state.fresh,CL.isArmed(key),CL.isPermanent(key));
         // "已配置"= 有能量限额 / 充满即停 / 长期供电：进度条与下方状态点共用同一判定
         const armed = CL.isArmed(key);
         const barEl = document.getElementById(`limitBar_${key}`);
@@ -1033,12 +1037,21 @@ async function setScene(mode) {
 async function togglePort(key) {
     const wanted = DeviceStore.current();
     const on = !state.ports[key].enabled;
-    state.ports[key].enabled = on;
-    markLocalChange();
-    renderAll();
+    const pendingKey=wanted+':'+key;
+    if(pendingPortCommands.has(pendingKey))return;
+    const toggle=document.getElementById('toggle'+key.toUpperCase());
+    if(toggle)toggle.checked=!on;
+    if(!on && (state.ports[key].valid === false || state.ports[key].w > 0) && !await PortUI.confirmOff(key))return;
+    if(DeviceStore.current()!==wanted)return;
+    if(pendingPortCommands.has(pendingKey))return;
+    pendingPortCommands.add(pendingKey);
+    if(toggle){toggle.disabled=true;toggle.dataset.pending='1';}
+    toast(PortUI.text('正在发送端口指令…','Sending port command…'),true);
     try {
         await api(`/api/port`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port: key, action: on ? 'on' : 'off' }) });
+        if (DeviceStore.current() === wanted) { state.ports[key].enabled=on; toast(PortUI.text('端口指令已确认','Port command confirmed')); await fetchStatus(); }
     } catch(e) { if (DeviceStore.current() === wanted) { state.ports[key].enabled = !on; renderAll(); } console.error(e); }
+    finally { pendingPortCommands.delete(pendingKey); if(toggle) {delete toggle.dataset.pending;toggle.disabled=state.ports[key].enabledKnown === false;} }
 }
 
 async function toggleTrickle() {

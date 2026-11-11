@@ -4,12 +4,7 @@
     align-items: center;
     gap: 8px;
 }
-.remote-actions-floating {
-    position: fixed;
-    right: max(12px, env(safe-area-inset-right));
-    bottom: max(12px, env(safe-area-inset-bottom));
-    z-index: 210;
-}
+.remote-actions-page { padding: 18px max(12px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)); justify-content: center; }
 .remote-actions button {
     min-height: 44px;
     padding: 8px 14px;

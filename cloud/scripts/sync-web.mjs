@@ -9,7 +9,7 @@ for(const name of await readdir(path.join(root,'cloud/ui')))await cp(path.join(r
 for(const name of ['index.html','phone.html','config.html']){
  const p=path.join(destination,name);let s=await readFile(p,'utf8');
  s=s.replace('<span>macOS</span>', '<span>ESP32</span>');
- const freshness='<span class="cloud-freshness"><span id="cloudFreshness" role="status">正在连接网关…</span><span id="cloudFreshnessTime" aria-hidden="true"></span></span>';
+ const freshness='<span class="cloud-freshness"><span id="cloudFreshness" role="status">正在连接网关…</span><span id="cloudFreshnessTime"></span></span>';
  if(name==='index.html')s=s.replace('<div class="topbar-status">',`<div class="topbar-status">\n${freshness}`);
  if(name==='phone.html')s=s.replace('href="config.html"','href="/config.html?from=phone"').replace('<div id="connectionFeedback"',`${freshness}\n<div id="connectionFeedback"`);
  const transport=name==='config.html'?'':'<script src="/remote-transport.js"></script>\n';
