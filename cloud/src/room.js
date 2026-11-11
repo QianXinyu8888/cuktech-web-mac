@@ -78,7 +78,7 @@ class DeviceRoom {
   // Network jitter can make consecutive one-second samples arrive slightly
   // early; dropping those doubles the apparent update interval.
   const minimumInterval=this.viewers.size?interval-250:interval;
-  if(a.lastAcceptedAt!==undefined && now-a.lastAcceptedAt<minimumInterval)return;
+  if(a.lastAcceptedAt!==undefined && now-a.lastAcceptedAt<minimumInterval && data.blePhase===this.latest?.blePhase && data.bleConnected===this.latest?.bleConnected)return;
   this.latest={...data,receivedAt:now};
   const attachment={...a,role:'device',lastAcceptedAt:now,latest:this.latest,...(this.settings?{settings:this.settings}:{}),...(a.automationProgress?{automationProgress:a.automationProgress}:{})};
   if(new TextEncoder().encode(JSON.stringify(attachment)).length>=MAX_ATTACHMENT_BYTES){socket.close(1008,'Snapshot too large');this.disconnect(socket);return;}
@@ -111,7 +111,9 @@ class DeviceRoom {
   const connected=!!this.producer&&!!this.latest?.bleConnected&&age>=0&&age<=STATUS_FRESHNESS_MS;
   const ports=Object.fromEntries(['c1','c2','c3','a'].map((id,index)=>{const p=this.latest?.ports.find(p=>p.id===id);return [String(index+1),{voltage:p?.voltage??0,current:p?.current??0,power:p?.power??0,active:connected&&(p?.active??false),valid:connected&&(p?.valid??false),protocol:p?.protocol??'idle',enabledKnown:connected&&Object.hasOwn(settings,'16'),enabled:!!((settings['16']??0)&2**index)}];}));
   const automation=this.automationState;
-  return {...(automation?{permanent_ports:automation.permanent,full_off_ports:automation.fullOff}:{}),connected,authenticated:connected,connection:{phase:connected?'connected':'disabled'},ports,settings,protocol_extend:value,protocol_switches:decodeSwitches(value),device_model:this.settings?.deviceModel??'',firmware_version:this.settings?.firmwareVersion??'',gateway_connected:!!this.producer,receivedAt:this.latest?.receivedAt??null};
+  const fresh=!!this.producer&&age>=0&&age<=STATUS_FRESHNESS_MS;
+  const phase=connected?'connected':fresh&&this.latest?.blePhase&&this.latest.blePhase!=='connected'?this.latest.blePhase:'disabled';
+  return {...(automation?{permanent_ports:automation.permanent,full_off_ports:automation.fullOff}:{}),connected,authenticated:connected,connection:{phase},ports,settings,protocol_extend:value,protocol_switches:decodeSwitches(value),device_model:this.settings?.deviceModel??'',firmware_version:this.settings?.firmwareVersion??'',gateway_connected:!!this.producer,receivedAt:this.latest?.receivedAt??null};
  }
  command(command,{onSuccess}={}){
   if(this.pending)return Promise.resolve(Response.json({ok:false,error:'Another command is pending'},{status:409}));

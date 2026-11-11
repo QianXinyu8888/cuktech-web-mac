@@ -9,6 +9,7 @@ test('strict schema rejects unknown/private fields, duplicates, invalid values',
  assert.deepEqual(validateTelemetry(sample()),sample());
  for(const change of [s=>s.token='private',s=>s.ports[0].mac='x',s=>s.ports[1].id='c1',s=>s.seq=-1,s=>s.ports[0].power=Infinity,s=>s.ports[0].valid=1]) {const s=sample();change(s);assert.throws(()=>validateTelemetry(s));}
 });
+test('telemetry accepts explicit connection phases while rejecting invalid or inconsistent phases',()=>{const s=sample();s.bleConnected=false;s.blePhase='scanning';assert.deepEqual(validateTelemetry(s),s);assert.throws(()=>validateTelemetry({...s,blePhase:'unknown'}));assert.throws(()=>validateTelemetry({...s,bleConnected:true}));});
 test('signed sessions expire and cannot be forged',async()=>{const token=await signSession(env.SESSION_SECRET,1000);assert.equal(await verifySession(token,env.SESSION_SECRET,1001),true);assert.equal(await verifySession(token,env.SESSION_SECRET,1000+12*3600*1000),false);assert.equal(await verifySession(token+'x',env.SESSION_SECRET,1001),false);});
 test('login requires same origin and separate viewer password',async()=>{
  const req=(origin,password)=>new Request('https://cloud.example/api/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({password})});

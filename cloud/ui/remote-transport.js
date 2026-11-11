@@ -97,7 +97,7 @@
       if((msg.type==='init'||msg.type==='mac-status') && msg.data){
         const data=msg.data, device=msg.device||'default';
         CloudEvents.latestPorts??={};CloudEvents.lastStatus??={};CloudEvents.latestPorts[device]=data.ports;
-        const fingerprint=JSON.stringify([data.connected,data.authenticated,data.settings,data.protocol_extend,data.firmware_version,data.device_model,data.gateway_connected,Object.values(data.ports||{}).map(p=>[p.valid,p.enabledKnown])]);
+        const fingerprint=JSON.stringify([data.connected,data.authenticated,data.connection?.phase,data.settings,data.protocol_extend,data.firmware_version,data.device_model,data.gateway_connected,Object.values(data.ports||{}).map(p=>[p.valid,p.enabledKnown])]);
         const changed=fingerprint!==CloudEvents.lastStatus[device];CloudEvents.lastStatus[device]=fingerprint;
         if(msg.type==='init')return [{...data,type:'init',device,...(msg.devices?{devices:msg.devices}:{})}];
         return changed?[{...data,type:'status',device}]:[];

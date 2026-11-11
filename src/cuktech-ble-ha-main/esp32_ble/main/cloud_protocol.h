@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "automation_engine.h"
 typedef struct { float voltage, current, power; bool active, valid, enabled_known, enabled; char protocol[16]; } CloudPort;
-typedef struct { uint64_t uptime_ms; bool ble_connected; CloudPort ports[4]; } CloudSnapshot;
+typedef struct { uint64_t uptime_ms; bool ble_connected; const char *ble_phase; CloudPort ports[4]; } CloudSnapshot;
 typedef struct { char data[1024]; size_t length, total, frame_offset; bool accepting; } CloudRx;
 bool cloud_url_valid(const char *url);
 bool cloud_token_valid(const char *token);

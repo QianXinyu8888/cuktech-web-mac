@@ -53,7 +53,7 @@ static int _disc_chr_cb(uint16_t conn_handle, const struct ble_gatt_error *error
 typedef struct { uint8_t data[NOTIF_ITEM_SIZE]; size_t len; uint16_t conn_handle, attr_handle; } NotifItem;
 typedef struct { float voltage, current, power; uint8_t protocol, status; bool active; } PortData;
 
-static BLEState _state = BLE_IDLE;
+static volatile BLEState _state = BLE_IDLE;
 static StateCallback _state_cb = NULL;
 static PortDataCallback _port_data_cb = NULL;
 static uint16_t _conn_handle = 0xFFFF;

@@ -139,7 +139,15 @@ static const char* get_proto_name(uint8_t code) {
 static bool get_cloud_snapshot(CloudSnapshot *snapshot) {
     if (!state_mutex || xSemaphoreTake(state_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
     snapshot->uptime_ms = esp_timer_get_time() / 1000;
-    snapshot->ble_connected = ble_ready_flag;
+    BLEState ble_state=ble_manager_state();
+    snapshot->ble_connected = ble_ready_flag && ble_state==BLE_READY && ble_manager_is_enabled();
+    if(!ble_manager_is_enabled()) snapshot->ble_phase="disabled";
+    else if(snapshot->ble_connected) snapshot->ble_phase="connected";
+    else if(ble_state==BLE_SCANNING) snapshot->ble_phase="scanning";
+    else if(ble_state==BLE_AUTHENTICATING) snapshot->ble_phase="authenticating";
+    else if(ble_state==BLE_CONNECTING || ble_state==BLE_READY) snapshot->ble_phase="connecting";
+    else if(ble_state==BLE_RECONNECT) snapshot->ble_phase="retry_wait";
+    else snapshot->ble_phase="waiting";
     for (int i = 0; i < 4; ++i) {
         PortData p = port_data[i];
         snapshot->ports[i] = (CloudPort){ .voltage=p.voltage, .current=p.current,
@@ -181,8 +189,15 @@ static bool dispatch_cloud_command(const CloudCommand *command) {
     strcpy(cmd.cloud_id, command->id);
     cmd.type = command->action==CLOUD_ACTION_PORT ? CMD_PORT :
         command->action==CLOUD_ACTION_SET ? CMD_SET : CMD_CLOUD_BLE;
+    /* BLE requests are accepted as soon as queued. Discovery and
+       authentication may legitimately outlast the request deadline. */
+    bool ble_request=cmd.type==CMD_CLOUD_BLE;
+    if(ble_request) cmd.cloud_id[0]=0;
     if (xQueueSend(urgent_queue, &cmd, 0) != pdTRUE) return false;
-    if (cmd.type==CMD_CLOUD_BLE && cmd.value && ble_connect_sem) xSemaphoreGive(ble_connect_sem);
+    if (ble_request) {
+        if (cmd.value && ble_connect_sem) xSemaphoreGive(ble_connect_sem);
+        cloud_bridge_complete(command->id,true,NULL);
+    }
     return true;
 }
 static bool get_cloud_settings(char *out, size_t capacity) {
@@ -677,7 +692,6 @@ static void ble_task(void *pvParameters) {
     BleCommand cmd;
     BleResult res;
     bool was_ready = false;
-    BleCommand cloud_ble_pending={0};
     // Port telemetry comes via push notifications. Some charger firmware
     // versions may reject settings reads, so cloud-mode polling cannot block control.
 
@@ -718,8 +732,7 @@ static void ble_task(void *pvParameters) {
                         bool confirmed=ble_manager_set_enabled(cmd.value!=0);
                         ble_enabled=cmd.value!=0;
                         if (!confirmed) cloud_bridge_complete(cmd.cloud_id,false,"disconnect_unconfirmed");
-                        else if (!cmd.value || ble_manager_is_ready()) cloud_bridge_complete(cmd.cloud_id,true,NULL);
-                        else cloud_ble_pending=cmd;
+                        else cloud_bridge_complete(cmd.cloud_id,true,NULL);
                     } else if (!ble_manager_is_ready()) {
                         cloud_bridge_complete(cmd.cloud_id,false,"ble_disconnected");
                     } else {
@@ -737,6 +750,10 @@ static void ble_task(void *pvParameters) {
                     continue;
                 }
                 switch (cmd.type) {
+                case CMD_CLOUD_BLE:
+                    if(ble_manager_set_enabled(cmd.value!=0)) ble_enabled=cmd.value!=0;
+                    else { ble_manager_set_enabled(true); ble_enabled=true; ESP_LOGW(TAG,"BLE stop could not be confirmed"); }
+                    break;
                 case CMD_GET: {
                     if (g_cfg.cloud_enabled) {
                         if (ble_manager_is_ready()) ble_manager_send_get_async(cmd.piid,cmd.poll_seq);
@@ -813,16 +830,6 @@ static void ble_task(void *pvParameters) {
 
         // BLE state machine & response processing
         ble_manager_loop();
-
-        if (cloud_ble_pending.cloud_id[0]) {
-            if (cloud_wall_ms()>=cloud_ble_pending.cloud_expires_at) {
-                cloud_bridge_complete(cloud_ble_pending.cloud_id,false,"ble_connect_timeout");
-                cloud_ble_pending.cloud_id[0]=0;
-            } else if (ble_manager_is_ready()) {
-                cloud_bridge_complete(cloud_ble_pending.cloud_id,true,NULL);
-                cloud_ble_pending.cloud_id[0]=0;
-            }
-        }
 
         // State change notification
         {

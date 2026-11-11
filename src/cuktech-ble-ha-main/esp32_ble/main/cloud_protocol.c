@@ -58,8 +58,9 @@ bool cloud_format_telemetry(const CloudSnapshot *s, uint64_t seq, char *out, siz
     cJSON_AddStringToObject(root,"type","telemetry"); cJSON_AddNumberToObject(root,"version",1);
     cJSON_AddNumberToObject(root,"seq",seq); cJSON_AddNumberToObject(root,"uptimeMs",s->uptime_ms);
     cJSON_AddBoolToObject(root,"bleConnected",s->ble_connected);
+    if(s->ble_phase)cJSON_AddStringToObject(root,"blePhase",s->ble_phase);
     cJSON *ports=cJSON_AddArrayToObject(root,"ports");
-    if (!ports || cJSON_GetArraySize(root)!=6) { cJSON_Delete(root); return false; }
+    if (!ports || cJSON_GetArraySize(root)!=(s->ble_phase?7:6)) { cJSON_Delete(root); return false; }
     for (int i=0;i<4;++i) {
         const CloudPort *p=&s->ports[i]; cJSON *port=cJSON_CreateObject();
         if (!port || !ports) { cJSON_Delete(port); cJSON_Delete(root); return false; }

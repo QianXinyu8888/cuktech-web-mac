@@ -45,7 +45,9 @@ int main(void) {
     snapshot.ports[0]=(CloudPort){.voltage=20,.current=2,.power=40,.active=true,.valid=true};
     strcpy(snapshot.ports[0].protocol,"PD");
     char out[2048];
+    snapshot.ble_phase="scanning";
     assert(cloud_format_telemetry(&snapshot, 0, out, sizeof out));
+    assert(strstr(out,"\"blePhase\":\"scanning\""));
     assert(strstr(out,"\"valid\":true"));
     assert(strstr(out,"\"valid\":false"));
     assert(strstr(out,"\"id\":\"a\""));

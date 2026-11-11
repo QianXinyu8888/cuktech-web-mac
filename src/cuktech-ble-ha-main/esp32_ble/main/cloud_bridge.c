@@ -153,6 +153,7 @@ static void cloud_task(void *arg) {
     char message[1536], last_settings[1024]={0}, last_automation[1024]={0};
     CloudCommand pending={0};
     int64_t last_settings_check=-1000, last_history_attempt=-30000;
+    const char *last_ble_phase=NULL;
     CloudHistoryFlight history_flight={0};
     for (;;) {
         time_t now=time(NULL);
@@ -256,12 +257,12 @@ static void cloud_task(void *arg) {
                 }
             }
         }
-        if ((flags&CLOUD_CONNECTED) && uptime-last_sent>=interval) {
+        if (flags&CLOUD_CONNECTED) {
             CloudSnapshot snapshot={0};
-            if (get_snapshot(&snapshot) && cloud_format_telemetry(&snapshot,seq,message,sizeof message)) {
+            if (get_snapshot(&snapshot) && ((flags&CLOUD_NEW_CONNECTION) || uptime-last_sent>=interval || (snapshot.ble_phase && (!last_ble_phase || strcmp(last_ble_phase,snapshot.ble_phase)))) && cloud_format_telemetry(&snapshot,seq,message,sizeof message)) {
                 int length=strlen(message);
                 if (esp_websocket_client_send_text(client,message,length,pdMS_TO_TICKS(3000))==length) {
-                    last_sent=uptime; seq=(seq+1)%9007199254740992ULL;
+                    last_sent=uptime; last_ble_phase=snapshot.ble_phase; seq=(seq+1)%9007199254740992ULL;
                 }
             }
         }

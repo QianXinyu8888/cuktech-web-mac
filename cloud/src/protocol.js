@@ -1,7 +1,8 @@
 export const MAX_MESSAGE_BYTES = 2048;
 const keys=(o,names)=>o && typeof o==='object' && !Array.isArray(o) && Object.keys(o).length===names.length && names.every(k=>Object.hasOwn(o,k));
 export function validateTelemetry(data) {
- if(!keys(data,['type','version','seq','uptimeMs','bleConnected','ports']) || data.type!=='telemetry' || data.version!==1 || !Number.isSafeInteger(data.seq) || data.seq<0 || !Number.isFinite(data.uptimeMs) || data.uptimeMs<0 || typeof data.bleConnected!=='boolean' || !Array.isArray(data.ports) || data.ports.length!==4) throw new Error('Invalid telemetry');
+ const base=['type','version','seq','uptimeMs','bleConnected','ports'];
+ if(!(keys(data,base)||keys(data,[...base,'blePhase'])) || data.type!=='telemetry' || data.version!==1 || !Number.isSafeInteger(data.seq) || data.seq<0 || !Number.isFinite(data.uptimeMs) || data.uptimeMs<0 || typeof data.bleConnected!=='boolean' || (Object.hasOwn(data,'blePhase')&&(!['disabled','waiting','scanning','connecting','authenticating','retry_wait','connected'].includes(data.blePhase)||(data.blePhase==='connected')!==data.bleConnected)) || !Array.isArray(data.ports) || data.ports.length!==4) throw new Error('Invalid telemetry');
  const seen=new Set();
  for(const p of data.ports){
   if(!keys(p,['id','voltage','current','power','active','valid','protocol']) || !['c1','c2','c3','a'].includes(p.id) || seen.has(p.id) || !['voltage','current','power'].every(k=>Number.isFinite(p[k]) && p[k]>=0 && p[k]<=100000) || typeof p.active!=='boolean' || typeof p.valid!=='boolean' || typeof p.protocol!=='string' || new TextEncoder().encode(p.protocol).length>32 || /[\u0000-\u001f\u007f]/.test(p.protocol)) throw new Error('Invalid port');
